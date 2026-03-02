@@ -356,7 +356,7 @@ async function handleShowStatus(): Promise<ActionResult> {
   const telegramStats = getTelegramSessionStats();
   const chronicleStats = isChronicleAvailable() ? getChronicleStats() : null;
 
-  let response = `📊 *Gh-Claw Status*\n\n`;
+  let response = `📊 *GHClaw Status*\n\n`;
   response += `*Telegram Sessions:*\n`;
   response += `• Active: ${telegramStats.activeSessions}\n`;
   response += `• Total: ${telegramStats.totalSessions}\n`;

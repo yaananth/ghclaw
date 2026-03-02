@@ -97,7 +97,7 @@ async function handleStart(ctx: CommandContext): Promise<CommandResult> {
   const name = ctx.username ? `@${ctx.username}` : `User ${ctx.userId}`;
 
   return {
-    response: `👋 *Welcome to Gh-Claw!*
+    response: `👋 *Welcome to GHClaw!*
 
 I'm your Telegram interface to GitHub Copilot CLI.
 
@@ -117,7 +117,7 @@ Or just ask me anything!`,
 
 async function handleHelp(ctx: CommandContext): Promise<CommandResult> {
   return {
-    response: `📖 *Gh-Claw Help*
+    response: `📖 *GHClaw Help*
 
 *Just talk naturally!* No commands needed. Examples:
 
@@ -276,7 +276,7 @@ async function handleStatus(ctx: CommandContext): Promise<CommandResult> {
   const telegramStats = getTelegramSessionStats();
   const chronicleStats = isChronicleAvailable() ? getChronicleStats() : null;
 
-  let response = `📊 *Gh-Claw Status*\n\n`;
+  let response = `📊 *GHClaw Status*\n\n`;
 
   response += `*Telegram Sessions:*\n`;
   response += `• Active: ${telegramStats.activeSessions}\n`;

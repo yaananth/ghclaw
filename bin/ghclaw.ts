@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Gh-Claw CLI
+ * GHClaw CLI
  * Local Telegram bot powered by Copilot CLI
  *
  * Usage: ghclaw <command>
@@ -44,7 +44,7 @@ program
   .description('Show current bot status at a glance')
   .action(async () => {
     console.log('╔══════════════════════════════════════════════════════════════╗');
-    console.log('║                     Gh-Claw Status                          ║');
+    console.log('║                     GHClaw Status                          ║');
     console.log('╚══════════════════════════════════════════════════════════════╝\n');
 
     // Config status

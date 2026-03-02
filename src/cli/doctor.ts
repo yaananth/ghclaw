@@ -490,7 +490,7 @@ async function checkGithubIntegration(): Promise<DiagnosticResult[]> {
 export function formatDoctorReport(report: DoctorReport): string {
   const lines: string[] = [
     '╔══════════════════════════════════════════════════════════════╗',
-    '║                     Gh-Claw Doctor                          ║',
+    '║                     GHClaw Doctor                          ║',
     '╚══════════════════════════════════════════════════════════════╝',
     '',
   ];

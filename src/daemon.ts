@@ -1,5 +1,5 @@
 /**
- * Gh-Claw Main Daemon
+ * GHClaw Main Daemon
  *
  * Polls Telegram and processes messages with Copilot CLI.
  * Uses Copilot CLI's built-in session management (Chronicle) for all memory.
@@ -81,7 +81,7 @@ function getChatKey(chatId: number, threadId: number): string {
 }
 
 async function main() {
-  console.log('🤖 Gh-Claw Starting...\n');
+  console.log('🤖 GHClaw Starting...\n');
 
   const config = await getConfigAsync();
   const client = new TelegramClient(config.telegram.botToken);

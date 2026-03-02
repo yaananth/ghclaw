@@ -22,7 +22,7 @@ import { checkRepoExists, createRepo, cloneRepo, initRepoStructure, setRepoSecre
 export async function runSetup(): Promise<void> {
   console.log(`
 ╔══════════════════════════════════════════════════════════════╗
-║                     Gh-Claw Setup                           ║
+║                     GHClaw Setup                           ║
 ║         Local Telegram Bot powered by Copilot CLI            ║
 ╚══════════════════════════════════════════════════════════════╝
 `);
