@@ -481,9 +481,9 @@ program
       console.log('⚠️  Link failed:', link.stderr?.toString().trim());
     }
 
-    // Run health check
+    // Run health check (with auto-fix so upgrade resolves issues like missing GH_PAT)
     console.log('\n🩺 Running health check...');
-    const report = await runDoctor();
+    const report = await runDoctor(true);
     console.log(formatDoctorReport(report));
 
     // If config is incomplete, prompt setup
