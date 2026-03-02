@@ -1,0 +1,25 @@
+{
+  "name": "ghclaw",
+  "version": "0.1.0",
+  "description": "Local Telegram bot powered by Copilot CLI with full feature discovery",
+  "type": "module",
+  "bin": {
+    "ghclaw": "./bin/ghclaw.ts"
+  },
+  "scripts": {
+    "start": "bun run src/daemon.ts",
+    "setup": "bun run src/cli/setup.ts",
+    "dev": "bun run --watch src/daemon.ts",
+    "discover": "bun run src/copilot/discovery.ts",
+    "link": "bun link",
+    "postinstall": "echo '✅ Run: bun link to make ghclaw available globally'"
+  },
+  "dependencies": {
+    "commander": "^12.0.0",
+    "inquirer": "^9.2.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/inquirer": "^9.0.0"
+  }
+}

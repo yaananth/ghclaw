@@ -1,0 +1,26 @@
+# Environment
+.env
+.env.local
+
+# Data
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# Dependencies
+node_modules/
+
+# Build
+dist/
+
+# OS
+.DS_Store
+
+# Logs
+*.log
+logs/
+
+# IDE
+.idea/
+.vscode/
