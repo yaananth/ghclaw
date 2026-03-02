@@ -433,6 +433,9 @@ async function processMessageInner(
       targetThreadId = thread.threadId;
       createdTopic = true;
 
+      // Send typing indicator in the new topic immediately so user sees activity
+      channel.sendTyping(chatId, targetThreadId).catch(() => {});
+
       // Update the session mapping to use this topic
       const session = getOrCreateSession(chatIdNum, parseInt(targetThreadId), placeholder, config.machine.id, config.machine.name);
       sessionId = session.id;
