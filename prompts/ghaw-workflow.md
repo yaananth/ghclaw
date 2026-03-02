@@ -2,11 +2,15 @@ You are creating a gh-aw (GitHub Agentic Workflows) workflow.
 
 ## Step 1: Fetch the latest gh-aw documentation
 
-BEFORE writing anything, fetch the official reference to get the current spec:
+BEFORE writing anything, fetch these official references to get the current spec:
 
-Fetch `https://raw.githubusercontent.com/github/gh-aw/main/.github/aw/github-agentic-workflows.md`
+1. **Workflow spec**: Fetch `https://raw.githubusercontent.com/github/gh-aw/main/.github/aw/github-agentic-workflows.md`
+   This is the canonical reference for ALL gh-aw frontmatter fields: triggers, schedule syntax, engines, permissions, safe-outputs, tools, MCP servers, network/firewall, sandbox, etc.
 
-This is the canonical reference for ALL gh-aw frontmatter fields: triggers, schedule syntax, engines, permissions, safe-outputs, tools, MCP servers, network/firewall, sandbox, etc. The spec evolves — always use what the doc says, not prior knowledge.
+2. **Auth requirements**: Fetch `https://github.github.com/gh-aw/reference/auth/`
+   This is the canonical reference for ALL authentication: which secrets each engine needs, token scopes, setup commands, GitHub App alternatives, and supplemental auth for advanced features.
+
+The spec evolves — always use what the docs say, not prior knowledge. The auth page is the single source of truth for engine-to-secret mappings and token creation.
 
 ## Step 2: Check existing workflows and recent failures
 
@@ -29,20 +33,16 @@ gh run list -R {{repoOwner}}/{{repoName}} --status failure --limit 5 2>/dev/null
 - Inspect the failure: `gh run view <run-id> -R {{repoOwner}}/{{repoName}} --log-failed 2>/dev/null`
 - Diagnose the root cause (missing secret, bad engine, permission issue, bad config, etc.)
 - Fix the underlying issue (update the workflow markdown, report missing secrets, etc.)
-- If the fix is a missing secret, report it clearly with the setup command
+- If the fix is a missing secret, use the auth docs you fetched to provide the correct setup command
 - Recompile after fixing: `cd {{repoPath}} && gh aw compile <workflow-name>`
 
 If the failures are unrelated to the current task, note them but continue.
 
-## Step 3: Validate engine secrets (CRITICAL — DO NOT SKIP)
+## Step 3: Validate engine auth (CRITICAL — DO NOT SKIP)
 
 The engine for this workflow is: **{{engine}}**
 
-Engine-to-secret mapping:
-- **copilot** → `COPILOT_GITHUB_TOKEN`
-- **claude** → `ANTHROPIC_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`
-- **codex** → `OPENAI_API_KEY`
-- **gemini** → `GEMINI_API_KEY`
+Using the auth docs you fetched in Step 1, determine which secret is required for the **{{engine}}** engine.
 
 Check if the required secret exists:
 ```bash
@@ -52,7 +52,7 @@ gh secret list -R {{repoOwner}}/{{repoName}} 2>/dev/null
 **If the required secret for engine "{{engine}}" is MISSING:**
 1. **STOP — do NOT write the workflow**
 2. Report exactly which secret is missing
-3. Provide the exact command to set it: `gh aw secrets set <SECRET_NAME> --owner {{repoOwner}} --repo {{repoName}}`
+3. Provide the exact setup command from the auth docs (including token creation links if available)
 4. Do NOT proceed to Step 4
 
 **If the secret exists, continue.**
@@ -103,6 +103,6 @@ If compilation fails:
 After successful compilation, report:
 - What the workflow does
 - Which engine and tools it uses
-- Whether any required secrets are missing (and how to set them)
+- Whether any required secrets are missing (and how to set them, per the auth docs)
 - The schedule in human-readable form
 - Any existing failed runs you found and whether they were fixed
