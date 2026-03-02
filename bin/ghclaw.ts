@@ -559,6 +559,36 @@ program
     }
   });
 
+program
+  .command('chronicle-logs')
+  .description('Show Chronicle sync activity (session → Telegram topic creation)')
+  .option('-n, --lines <n>', 'Number of lines', '30')
+  .option('-f, --follow', 'Follow output')
+  .action(async (options) => {
+    const fs = require('fs');
+    const { spawn } = require('child_process');
+    const logFile = `${getConfigDir()}/daemon.log`;
+
+    if (!fs.existsSync(logFile)) {
+      console.log('📭 No logs yet. Start the daemon first: ghclaw start');
+      return;
+    }
+
+    const pattern = '(Chronicle|chronicle|\\[Sync\\]|Created topic|synced_chronicle|startChronicleSync)';
+
+    if (options.follow) {
+      const tail = spawn('bash', ['-c', `tail -f "${logFile}" | grep --line-buffered -E '${pattern}'`], {
+        stdio: 'inherit',
+      });
+      process.on('SIGINT', () => tail.kill());
+    } else {
+      const tail = spawn('bash', ['-c', `tail -${options.lines * 5} "${logFile}" | grep -E '${pattern}' | tail -${options.lines}`], {
+        stdio: 'inherit',
+      });
+      await new Promise(resolve => tail.on('close', resolve));
+    }
+  });
+
 // ============================================================================
 // Telegram Utilities
 // ============================================================================
