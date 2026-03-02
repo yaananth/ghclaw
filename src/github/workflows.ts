@@ -152,7 +152,7 @@ ${sendStep}
             -f message="Auto-cleanup reminder \$WORKFLOW_ID" \\
             -f sha="\$SHA"
         env:
-          GH_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: \${{ secrets.GH_PAT }}
           WORKFLOW_ID: "${safeId}"
 `;
 }

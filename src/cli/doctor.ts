@@ -7,7 +7,7 @@ import { getConfigAsync, clearConfigCache } from '../config';
 import { getSecret, listSecrets, isKeychainAvailable } from '../secrets/keychain';
 import { TelegramClient } from '../telegram/client';
 import { getSecuritySetupInstructions } from '../telegram/security';
-import { checkGhAuth as checkGhAuthStatus, getGhToken } from '../github/auth';
+import { checkGhAuth as checkGhAuthStatus, getGhToken, getGhScopes } from '../github/auth';
 import { checkRepoExists } from '../github/repo';
 import { getSyncState } from '../github/sync';
 
@@ -57,7 +57,7 @@ export async function runDoctor(autoFix = false): Promise<DoctorReport> {
   results.push(...checkMisconfigurations());
 
   // 9. GitHub integration checks
-  results.push(...await checkGithubIntegration());
+  results.push(...await checkGithubIntegration(autoFix));
 
   // Summary
   const passed = results.filter(r => r.status === 'ok').length;
@@ -393,7 +393,7 @@ function checkMisconfigurations(): DiagnosticResult[] {
   return results;
 }
 
-async function checkGithubIntegration(): Promise<DiagnosticResult[]> {
+async function checkGithubIntegration(autoFix = false): Promise<DiagnosticResult[]> {
   const results: DiagnosticResult[] = [];
 
   try {
@@ -456,6 +456,63 @@ async function checkGithubIntegration(): Promise<DiagnosticResult[]> {
 
     // Check sync state
     const sync = getSyncState();
+
+    // Check GH_PAT secret exists (needed for reminder self-cleanup)
+    try {
+      const secretListProc = Bun.spawn(
+        ['gh', 'secret', 'list', '-R', `${config.github.username}/${config.github.repoName}`],
+        { stdout: 'pipe', stderr: 'pipe' }
+      );
+      const secretListExit = await secretListProc.exited;
+      const secretListOut = await new Response(secretListProc.stdout).text();
+
+      if (secretListExit !== 0) {
+        // gh secret list failed (auth/permission issue) — don't misdiagnose
+        results.push({
+          name: 'GitHub GH_PAT Secret',
+          status: 'warn',
+          message: 'Could not list repo secrets (auth or permission issue)',
+          fix: 'Run: gh auth refresh -s repo,workflow',
+        });
+      } else {
+        // Match exact secret name at start of line (gh secret list outputs "NAME\tUPDATED" per line)
+        const hasGhPat = /^GH_PAT\b/m.test(secretListOut);
+
+        if (!hasGhPat) {
+          let fixed = false;
+          if (autoFix) {
+            const [token, scopes] = await Promise.all([getGhToken(), getGhScopes()]);
+            if (token && scopes.includes('repo') && scopes.includes('workflow')) {
+              const { setRepoSecrets } = await import('../github/repo');
+              const result = await setRepoSecrets(config.github.username, config.github.repoName, { GH_PAT: token });
+              fixed = result.set.includes('GH_PAT');
+            }
+          }
+          results.push({
+            name: 'GitHub GH_PAT Secret',
+            status: fixed ? 'ok' : 'warn',
+            message: fixed
+              ? 'GH_PAT secret set (auto-fixed)'
+              : 'GH_PAT repo secret missing (reminders cannot self-delete)',
+            fix: fixed ? undefined : 'Run: ghclaw setup (or: gh secret set GH_PAT -R owner/repo)',
+            autoFixable: !fixed,
+          });
+        } else {
+          results.push({
+            name: 'GitHub GH_PAT Secret',
+            status: 'ok',
+            message: 'GH_PAT secret configured (reminders can self-cleanup)',
+          });
+        }
+      }
+    } catch {
+      results.push({
+        name: 'GitHub GH_PAT Secret',
+        status: 'warn',
+        message: 'Could not check GH_PAT secret',
+        fix: 'Run: gh secret set GH_PAT -R owner/repo',
+      });
+    }
     if (sync.lastSync) {
       const ageMs = Date.now() - sync.lastSync.getTime();
       const ageMin = Math.floor(ageMs / 60000);

@@ -16,7 +16,7 @@ import {
 import { getConfigDir, getConfigAsync, saveLocalConfig } from '../config';
 import { TelegramClient } from '../telegram/client';
 import { isChronicleAvailable, getRecentSessions } from '../copilot/chronicle';
-import { checkGhAuth, getGhUsername } from '../github/auth';
+import { checkGhAuth, getGhUsername, getGhToken, getGhScopes } from '../github/auth';
 import { checkRepoExists, createRepo, cloneRepo, initRepoStructure, setRepoSecrets } from '../github/repo';
 import { detectConfiguredChannels } from '../channels/registry';
 
@@ -556,10 +556,18 @@ export async function runSetup(): Promise<void> {
 
         // Set secrets automatically
         console.log('   Setting repo secrets...');
+        const ghToken = await getGhToken();
+        const ghScopes = await getGhScopes();
         const secrets: Record<string, string> = {
           TELEGRAM_BOT_TOKEN: token,
         };
         if (groupId) secrets.TELEGRAM_CHAT_ID = groupId;
+        if (ghToken && ghScopes.includes('workflow')) {
+          secrets.GH_PAT = ghToken;
+        } else if (ghToken) {
+          console.log('   ⚠️  gh auth token missing "workflow" scope — skipping GH_PAT');
+          console.log('      Reminders will not self-delete. Fix: gh auth refresh -s repo,workflow');
+        }
 
         const secretResult = await setRepoSecrets(targetOrg, targetRepo, secrets);
         if (secretResult.set.length > 0) {

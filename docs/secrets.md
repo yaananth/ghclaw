@@ -62,8 +62,9 @@ These are set automatically during setup on the `{user}/.ghclaw` repo:
 | `TELEGRAM_BOT_TOKEN` | Used by Actions workflows to send Telegram messages |
 | `TELEGRAM_CHAT_ID` | Target chat for reminder/schedule notifications |
 | `TELEGRAM_THREAD_ID` | Optional thread for notifications in forum groups |
+| `GH_PAT` | User's `gh auth token` (with `workflow` scope) for reminder self-cleanup |
 
-These enable GitHub Actions workflows (reminders, schedules) to send Telegram messages without any local compute.
+These enable GitHub Actions workflows (reminders, schedules) to send Telegram messages and self-delete reminder workflows without any local compute.
 
 ## Storage Locations
 

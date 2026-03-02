@@ -265,6 +265,7 @@ Sensitive values for GitHub Actions are stored as **repo-level secrets**, never 
 | `TELEGRAM_BOT_TOKEN` | Send Telegram notifications from Actions | Telegram | Setup wizard |
 | `TELEGRAM_CHAT_ID` | Target chat for notifications | Telegram | Setup wizard |
 | `TELEGRAM_THREAD_ID` | Optional thread for forum groups | Telegram | Setup wizard |
+| `GH_PAT` | Reminder self-cleanup (delete workflow files) | All | Setup wizard |
 
 Future channels will have their own secrets (e.g., `DISCORD_WEBHOOK_URL`, `SLACK_WEBHOOK_URL`).
 
@@ -284,7 +285,7 @@ The Copilot Coding Agent API (`src/copilot/agent.ts`):
 Reminder and schedule workflows are channel-aware:
 - Use `secrets.*` references, never hardcoded values
 - Channel-specific send steps (Telegram uses curl to Bot API, future channels use their own APIs)
-- Self-deleting reminders use `GITHUB_TOKEN` (automatic, scoped to repo)
+- Self-deleting reminders use `GH_PAT` repo secret (user's `gh auth token` with `workflow` scope, required because `GITHUB_TOKEN` lacks permission to delete workflow files)
 - No `pull_request_target` or other dangerous triggers
 - No external action dependencies (uses only `run:` steps with `curl`)
 - Workflows only execute on `schedule` trigger (cron)
@@ -393,4 +394,5 @@ If the GitHub token is compromised:
 - GitHub CLI authentication and scope verification
 - Copilot CLI availability
 - GitHub repo existence and sync status
+- GH_PAT repo secret presence (with auto-fix support)
 - Chronicle availability
