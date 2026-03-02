@@ -147,7 +147,8 @@ export interface Channel {
 
 /**
  * Stream a generator response to a channel with live updates.
- * Handles rate limiting, message length limits, and truncation.
+ * Handles rate limiting and message length limits.
+ * Sends multiple messages when output exceeds max length (no truncation).
  * Works with any Channel implementation that supports editing.
  */
 export async function streamToChannel(
@@ -157,16 +158,15 @@ export async function streamToChannel(
   options: SendOptions = {}
 ): Promise<void> {
   const info = await channel.getInfo();
-  const maxLen = Math.max(info.maxMessageLength - 100, 500); // Leave room for truncation notice, min 500
+  const maxLen = Math.max(info.maxMessageLength - 100, 500);
   const canEdit = info.supportsEditing;
 
-  let messageId: string | null = null;
+  let currentMessageId: string | null = null;
   let fullText = '';
   let lastUpdate = 0;
   let chunkCount = 0;
   const minUpdateInterval = 300;
   const charThreshold = 20;
-  let truncated = false;
 
   try {
     await channel.sendTyping(chatId, options.threadId);
@@ -174,35 +174,50 @@ export async function streamToChannel(
     // Typing indicator is best-effort, don't abort stream
   }
 
+  /** Finalize current message and reset for a new one */
+  async function splitMessage(): Promise<void> {
+    if (!currentMessageId || !fullText.trim()) return;
+    try {
+      await channel.edit(chatId, currentMessageId, fullText.trim(), options);
+    } catch {
+      // ignore edit errors
+    }
+    currentMessageId = null;
+    fullText = '';
+    lastUpdate = 0;
+  }
+
   for await (const chunk of generator) {
     chunkCount++;
 
     if (chunk.type === 'text') {
-      const prevLength = fullText.length;
       fullText += chunk.content + '\n';
 
-      if (fullText.length > maxLen && !truncated) {
-        truncated = true;
-        fullText = fullText.slice(0, maxLen);
-      }
+      // Split to new message if current exceeds limit
+      if (fullText.length > maxLen) {
+        let splitAt = fullText.lastIndexOf('\n', maxLen);
+        if (splitAt <= 0) splitAt = maxLen;
 
-      if (truncated && prevLength >= maxLen) continue;
+        const overflow = fullText.slice(splitAt);
+        fullText = fullText.slice(0, splitAt);
+        await splitMessage();
+        fullText = overflow;
+      }
 
       const now = Date.now();
       const timeSinceLastUpdate = now - lastUpdate;
-      const newChars = fullText.length - prevLength;
       const shouldUpdate = canEdit &&
         timeSinceLastUpdate >= minUpdateInterval &&
-        (!messageId || newChars >= charThreshold || fullText.length < 100);
+        (!currentMessageId || fullText.length >= charThreshold || fullText.length < 100);
 
       if (shouldUpdate) {
         try {
           const displayText = fullText + ' ▌';
-          if (!messageId) {
+          if (!currentMessageId) {
             const sent = await channel.send(chatId, displayText, options);
-            messageId = sent.id;
+            currentMessageId = sent.id;
           } else {
-            await channel.edit(chatId, messageId, displayText, options);
+            await channel.edit(chatId, currentMessageId, displayText, options);
           }
           lastUpdate = now;
         } catch {
@@ -212,13 +227,9 @@ export async function streamToChannel(
     } else if (chunk.type === 'done' || chunk.type === 'error') {
       let finalText = fullText.trim() || (chunk.type === 'error' ? `Error: ${chunk.content || 'Unknown'}` : 'Done');
 
-      if (truncated) {
-        finalText = finalText.slice(0, maxLen) + '\n\n_(Output truncated)_';
-      }
-
       try {
-        if (messageId && canEdit) {
-          await channel.edit(chatId, messageId, finalText, options);
+        if (currentMessageId && canEdit) {
+          await channel.edit(chatId, currentMessageId, finalText, options);
         } else {
           await channel.send(chatId, finalText, options);
         }

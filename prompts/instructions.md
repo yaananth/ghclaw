@@ -63,7 +63,18 @@ gh-aw workflows are markdown files with YAML frontmatter that compile to GitHub 
 - **Network**: firewall allowlists for external API access
 - **Permissions**: read-only by default; writes happen through safe-outputs only
 
-When creating agentic schedules, you'll be given the latest docs to work from. Always check if required engine secrets exist.
+When creating agentic schedules:
+- The system checks for existing workflows to avoid duplicates and inspects recent failed runs to auto-fix them
+- The default engine is **copilot** — only use others if the user explicitly requests a different engine
+- The latest gh-aw docs are fetched on the fly so workflows always match the current spec
+- Required engine secrets are validated before writing — if missing, the user gets the setup command
+- After successful creation, ask the user if they want to test run it
+
+**Test run an agentic workflow** (trigger, monitor, auto-fix):
+```json:ghclaw-action
+{"action": "test_agentic_workflow", "name": "weekly-pr-review"}
+```
+Use this when the user says "yes" to testing, or asks to "run", "test", or "try" an agentic workflow. The system will trigger the workflow, monitor it until completion, and if it fails, diagnose the root cause and auto-fix what it can (bad config, wrong engine, missing network rules, etc.). Secrets that need user action are reported with the exact setup command.
 
 **Sessions** (Copilot CLI sessions from Chronicle):
 ```json:ghclaw-action

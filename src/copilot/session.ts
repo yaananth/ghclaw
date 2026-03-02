@@ -9,6 +9,7 @@
  */
 
 import { getGhToken } from '../github/auth';
+import { getConfigDir } from '../config';
 
 export interface SessionOptions {
   model?: string;
@@ -53,7 +54,7 @@ export async function* executePrompt(
 
   // YOLO mode: allow all tools (user opted in)
   if (options.yoloMode) {
-    args.push('--allow-all-tools');
+    args.push('--yolo');
   }
 
   // Silent mode for cleaner output in non-interactive use
@@ -69,6 +70,8 @@ export async function* executePrompt(
     env: {
       ...process.env,
       GITHUB_TOKEN: (await getGhToken()) || '',
+      // Point Copilot CLI to ghclaw's AGENTS.md for custom instructions
+      COPILOT_CUSTOM_INSTRUCTIONS_DIRS: getConfigDir(),
     },
   });
 

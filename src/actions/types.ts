@@ -15,6 +15,7 @@ export type ActionType =
   | 'cancel_schedule'
   | 'create_coding_task'
   | 'create_agentic_schedule'
+  | 'test_agentic_workflow'
   | 'list_sessions'
   | 'search_sessions'
   | 'resume_session'
@@ -66,6 +67,11 @@ export interface CreateAgenticScheduleAction {
   schedule: string; // natural language cron
 }
 
+export interface TestAgenticWorkflowAction {
+  action: 'test_agentic_workflow';
+  name: string; // workflow name to test run
+}
+
 export interface ListSessionsAction {
   action: 'list_sessions';
   query?: string; // search term, or undefined for recent
@@ -104,6 +110,7 @@ export type GhclawAction =
   | CancelScheduleAction
   | CreateCodingTaskAction
   | CreateAgenticScheduleAction
+  | TestAgenticWorkflowAction
   | ListSessionsAction
   | SearchSessionsAction
   | ResumeSessionAction

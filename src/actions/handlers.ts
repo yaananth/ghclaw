@@ -14,6 +14,7 @@ import type {
   CancelScheduleAction,
   CreateCodingTaskAction,
   CreateAgenticScheduleAction,
+  TestAgenticWorkflowAction,
   ListSessionsAction,
   SearchSessionsAction,
   ResumeSessionAction,
@@ -69,6 +70,8 @@ export async function executeAction(
       return handleCreateCodingTask(action, context);
     case 'create_agentic_schedule':
       return handleCreateAgenticSchedule(action);
+    case 'test_agentic_workflow':
+      return handleTestAgenticWorkflow(action);
     case 'list_sessions':
       return handleListSessions(action);
     case 'search_sessions':
@@ -265,6 +268,10 @@ async function handleCreateAgenticSchedule(action: CreateAgenticScheduleAction):
     return { response: '❌ GitHub integration not enabled. Run: ghclaw setup' };
   }
 
+  // Default engine is copilot — the prompt instructs the LLM to validate secrets
+  // and block workflow creation if they're missing
+  const engine = 'copilot';
+
   try {
     // Create gh-aw workflow template in sync repo
     const workflowName = action.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 30);
@@ -281,7 +288,7 @@ async function handleCreateAgenticSchedule(action: CreateAgenticScheduleAction):
     }
 
     // Use Copilot CLI to write the workflow markdown with the user's intent
-    // Prompt tells CLI to fetch latest gh-aw docs on the fly before writing
+    // Prompt tells CLI to fetch latest gh-aw docs, validate secrets, and block if missing
     const writePrompt = loadPrompt('ghaw-workflow', {
       workflowPath,
       template,
@@ -292,6 +299,7 @@ async function handleCreateAgenticSchedule(action: CreateAgenticScheduleAction):
       repoOwner: config.github.username,
       repoName: config.github.repoName,
       workflowName,
+      engine,
     });
 
     const copilotOptions: CopilotSessionOptions = {
@@ -309,17 +317,56 @@ async function handleCreateAgenticSchedule(action: CreateAgenticScheduleAction):
 
     if (!compiled) {
       return {
-        response: `⚠️ *Agentic schedule created but compilation uncertain.*\n\n📝 ${action.name}\n⏰ ${action.schedule}\n\nThe LLM wrote the workflow markdown. Check \`${workflowPath}\` and run \`gh aw compile\` manually if needed.\n\n_Agent output:_\n${result.slice(0, 500)}`,
+        response: `⚠️ *Agentic schedule created but compilation uncertain.*\n\n📝 ${action.name}\n⏰ ${action.schedule}\n🔧 Engine: ${engine}\n\nThe LLM wrote the workflow markdown. Check \`${workflowPath}\` and run \`gh aw compile\` manually if needed.\n\n_Agent output:_\n${result.slice(0, 500)}`,
         parseMode: 'Markdown',
       };
     }
 
     return {
-      response: `🤖 *Agentic schedule created!*\n\n📝 ${action.name}\n⏰ ${action.schedule}\n✅ Compiled to GitHub Actions\n\n_Agent output:_\n${result.slice(0, 500)}`,
+      response: `🤖 *Agentic schedule created!*\n\n📝 ${action.name}\n⏰ ${action.schedule}\n🔧 Engine: ${engine}\n✅ Compiled to GitHub Actions\n\n_Agent output:_\n${result.slice(0, 500)}\n\n💡 Want me to test run it? I'll trigger it, monitor the run, and auto-fix any issues.`,
       parseMode: 'Markdown',
     };
   } catch (err: any) {
     return { response: `❌ Failed to create agentic schedule: ${err.message || err}` };
+  }
+}
+
+// ============================================================================
+// Agentic Workflow Test Handler
+// ============================================================================
+
+async function handleTestAgenticWorkflow(action: TestAgenticWorkflowAction): Promise<ActionResult> {
+  const config = await getConfigAsync();
+  if (!config.github.enabled) {
+    return { response: '❌ GitHub integration not enabled. Run: ghclaw setup' };
+  }
+
+  const workflowName = action.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 30);
+
+  try {
+    // Use Copilot CLI to run, monitor, and auto-fix the workflow
+    // The LLM handles the entire loop: trigger → poll → diagnose → fix → retry
+    const testPrompt = loadPrompt('ghaw-test', {
+      workflowName,
+      repoPath: config.github.repoPath,
+      repoOwner: config.github.username,
+      repoName: config.github.repoName,
+    });
+
+    const copilotOptions: CopilotSessionOptions = {
+      cliPath: config.copilot.cliPath,
+      yoloMode: true,
+      workingDir: config.github.repoPath,
+    };
+
+    const result = await executeSimple(testPrompt, copilotOptions);
+
+    return {
+      response: result.slice(0, 2000) || '✅ Test run complete.',
+      parseMode: 'Markdown',
+    };
+  } catch (err: any) {
+    return { response: `❌ Failed to test workflow: ${err.message || err}` };
   }
 }
 

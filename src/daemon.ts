@@ -26,7 +26,6 @@ import {
   getSessionMachine,
   getSyncedSessionIds,
   addSyncedSessionId,
-  type TelegramSession,
 } from './memory/session-mapper';
 import {
   handleCommand,
@@ -54,7 +53,7 @@ async function generateTopicTitle(message: string, cliPath: string = 'copilot'):
   const dirName = require('path').basename(cwd);
   const titlePrompt = loadPrompt('topic-title', { dirName, message: message.slice(0, 200) });
 
-  const proc = Bun.spawn([cliPath, '-p', titlePrompt, '--silent'], {
+  const proc = Bun.spawn([cliPath, '-p', titlePrompt, '--silent', '--yolo'], {
     stdout: 'pipe',
     stderr: 'pipe',
     env: {
@@ -118,6 +117,15 @@ async function main() {
     console.warn('⚠️ Could not discover features:', error);
   }
 
+  // Write custom instructions to .github/copilot-instructions.md
+  // Copilot CLI reads this automatically — no need to prepend system prompt to messages
+  try {
+    writeCopilotInstructions();
+    console.log(`\n📝 Copilot instructions written to ${getConfigDir()}/AGENTS.md`);
+  } catch (err) {
+    console.warn(`⚠️ Could not write copilot instructions: ${err}`);
+  }
+
   // Print config
   if (channelConfig.type === 'telegram') {
     console.log('\n🔒 Security Configuration:');
@@ -129,7 +137,7 @@ async function main() {
 
   console.log('\n⚡ Copilot Configuration:');
   console.log(`   Model: ${config.copilot.defaultModel || 'default'}`);
-  console.log(`   YOLO Mode: ${config.copilot.yoloMode ? '🔥 ENABLED (--allow-all-tools)' : 'disabled'}`);
+  console.log(`   YOLO Mode: ${config.copilot.yoloMode ? '🔥 ENABLED (--yolo)' : 'disabled'}`);
 
   console.log('\n💻 Machine:');
   console.log(`   Name: ${config.machine.name}`);
@@ -484,9 +492,9 @@ async function processMessageInner(
   console.log(`📩 [${sessionName}] user:${user.id}: ${logText}`);
 
   try {
-    // Build system prompt with capabilities
-    const systemPrompt = buildSystemPrompt({ name: sessionName } as TelegramSession);
-    const fullPrompt = `${systemPrompt}\n\nUser: ${prompt}`;
+    // Instructions are in .github/copilot-instructions.md (written on startup)
+    // Copilot CLI reads them automatically — just send the user's message
+    const fullPrompt = prompt;
 
     // Execute with Copilot CLI, resuming the session if we have one
     const sessionOptions: SessionOptions = {
@@ -567,55 +575,47 @@ async function processMessageInner(
   }
 }
 
-function buildSystemPrompt(session: TelegramSession): string {
-  // Sanitize session name to prevent injection
-  const safeName = session.name
-    .replace(/[\n\r]/g, ' ')
-    .replace(/[<>{}[\]"'`]/g, '')
-    .replace(/system|assistant|user|developer|tool/gi, '')
-    .trim()
-    .slice(0, 50);
-
+/**
+ * Write ghclaw AGENTS.md instructions for Copilot CLI to load automatically.
+ * Uses the config dir so we don't clobber the user's global copilot-instructions.md.
+ * The COPILOT_CUSTOM_INSTRUCTIONS_DIRS env var points Copilot CLI to our dir.
+ */
+function writeCopilotInstructions(): void {
   // Load instructions from file (contains action block format + available actions)
   let instructions: string;
   try {
     const raw = loadPrompt('instructions');
-    // Strip markdown headers for cleaner prompt
-    instructions = raw
-      .replace(/^#+\s+.*$/gm, '')  // Remove # headers
-      .replace(/\n{3,}/g, '\n\n') // Collapse multiple newlines
-      .trim();
+    instructions = raw.trim();
   } catch {
-    // Fallback if file not found
     instructions = `You are ghclaw, a middle manager AI that coordinates work across GitHub Copilot CLI's capabilities.
 Your role: Understand what the user needs, pick the best approach, and execute effectively.`;
   }
 
   // Build discovery vars
-  let slashCommands = '';
-  let tools = '';
-  let models = '';
+  let extras = '';
 
   if (discovery) {
     const slashCmds = discovery.features.filter(f => f.type === 'slash_command');
     if (slashCmds.length > 0) {
-      slashCommands = slashCmds.map(f => `- ${f.name}: ${f.description}`).join('\n');
+      extras += '\n\n## Copilot CLI Slash Commands\n\n';
+      extras += slashCmds.map(f => `- ${f.name}: ${f.description}`).join('\n');
     }
     if (discovery.tools.length > 0) {
-      tools = discovery.tools.slice(0, 15).join(', ');
+      extras += '\n\n## Copilot CLI Tools\n\n';
+      extras += discovery.tools.slice(0, 15).join(', ');
     }
     if (discovery.models.length > 0) {
-      models = discovery.models.join(', ');
+      extras += '\n\n## Available Models\n\n';
+      extras += discovery.models.join(', ');
     }
   }
 
-  return loadPrompt('system-prompt', {
-    instructions,
-    sessionName: safeName,
-    slashCommands,
-    tools,
-    models,
-  });
+  const content = instructions + extras + '\n';
+
+  // Write to ghclaw config dir as AGENTS.md
+  // Copilot CLI loads AGENTS.md from dirs listed in COPILOT_CUSTOM_INSTRUCTIONS_DIRS
+  const instructionsDir = getConfigDir();
+  fs.writeFileSync(path.join(instructionsDir, 'AGENTS.md'), content, 'utf-8');
 }
 
 function sleep(ms: number): Promise<void> {
@@ -627,6 +627,7 @@ function sleep(ms: number): Promise<void> {
  * - Strips action blocks from the displayed text
  * - Returns the full raw text for action block parsing
  * - Works with any Channel implementation
+ * - Sends multiple messages when output exceeds channel's max length (no truncation)
  */
 async function streamToChannelCollecting(
   channel: Channel,
@@ -641,21 +642,33 @@ async function streamToChannelCollecting(
   const maxMessageLength = Math.max(info.maxMessageLength - 100, 500);
   const canEdit = info.supportsEditing;
 
-  let messageId: string | null = null;
+  let currentMessageId: string | null = null;
   let fullText = '';      // Raw text (includes action blocks)
-  let displayText = '';   // Text shown to user (action blocks stripped)
+  let displayText = '';   // Text for current message
   let lastUpdate = 0;
   let chunkCount = 0;
   let inActionBlock = false;
   const minUpdateInterval = 300;
   const charThreshold = 20;
-  let truncated = false;
 
   let lastTypingTime = Date.now();
   try {
     await channel.sendTyping(chatId, options.threadId);
   } catch {
     // Typing indicator is best-effort
+  }
+
+  /** Finalize current message and reset for a new one */
+  async function splitMessage(): Promise<void> {
+    if (!currentMessageId || !displayText.trim()) return;
+    try {
+      await channel.edit(chatId, currentMessageId, displayText.trim(), options);
+    } catch {
+      // ignore edit errors
+    }
+    currentMessageId = null;
+    displayText = '';
+    lastUpdate = 0;
   }
 
   for await (const chunk of generator) {
@@ -678,31 +691,33 @@ async function streamToChannelCollecting(
       } else if (inActionBlock && line.trim() === ACTION_BLOCK_END) {
         inActionBlock = false;
       } else if (!inActionBlock) {
-        const prevDisplayLen = displayText.length;
         displayText += line + '\n';
-        const newChars = displayText.length - prevDisplayLen;
 
-        if (displayText.length > maxMessageLength && !truncated) {
-          truncated = true;
-          displayText = displayText.slice(0, maxMessageLength);
+        // Split to new message if current exceeds limit
+        if (displayText.length > maxMessageLength) {
+          let splitAt = displayText.lastIndexOf('\n', maxMessageLength);
+          if (splitAt <= 0) splitAt = maxMessageLength;
+
+          const overflow = displayText.slice(splitAt);
+          displayText = displayText.slice(0, splitAt);
+          await splitMessage();
+          displayText = overflow;
         }
-
-        if (truncated && prevDisplayLen >= maxMessageLength) continue;
 
         const now = Date.now();
         const timeSinceLastUpdate = now - lastUpdate;
         const shouldUpdate = canEdit &&
           timeSinceLastUpdate >= minUpdateInterval &&
-          (!messageId || newChars >= charThreshold || displayText.length < 100);
+          (!currentMessageId || displayText.length - (lastUpdate > 0 ? 0 : displayText.length) >= charThreshold || displayText.length < 100);
 
         if (shouldUpdate) {
           try {
             const showText = displayText + ' ▌';
-            if (!messageId) {
+            if (!currentMessageId) {
               const sent = await channel.send(chatId, showText, options);
-              messageId = sent.id;
+              currentMessageId = sent.id;
             } else {
-              await channel.edit(chatId, messageId, showText, options);
+              await channel.edit(chatId, currentMessageId, showText, options);
             }
             lastUpdate = now;
           } catch {
@@ -713,13 +728,9 @@ async function streamToChannelCollecting(
     } else if (chunk.type === 'done' || chunk.type === 'error') {
       let finalDisplay = displayText.trim() || (chunk.type === 'error' ? `❌ ${chunk.content || 'Unknown error'}` : '✓');
 
-      if (truncated) {
-        finalDisplay = finalDisplay.slice(0, maxMessageLength) + '\n\n_(Output truncated — use terminal for full response)_';
-      }
-
       try {
-        if (messageId && canEdit) {
-          await channel.edit(chatId, messageId, finalDisplay, options);
+        if (currentMessageId && canEdit) {
+          await channel.edit(chatId, currentMessageId, finalDisplay, options);
         } else {
           await channel.send(chatId, finalDisplay, options);
         }

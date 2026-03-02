@@ -39,6 +39,7 @@ const ACTION_SCHEMAS: Record<ActionType, { required: string[]; optional: string[
   cancel_schedule: { required: ['id'], optional: [] },
   create_coding_task: { required: ['description'], optional: ['repo'] },
   create_agentic_schedule: { required: ['name', 'description', 'schedule'], optional: [] },
+  test_agentic_workflow: { required: ['name'], optional: [] },
   list_sessions: { required: [], optional: ['query', 'hours'] },
   search_sessions: { required: ['query'], optional: [] },
   resume_session: { required: ['session_id'], optional: [] },
