@@ -12,43 +12,42 @@ ghclaw is a local middle manager AI that bridges Telegram to GitHub Copilot CLI'
 │  │  ghclaw daemon                                                      │  │
 │  │                                                                      │  │
 │  │  ┌──────────────┐    ┌──────────────────────────────────────────┐   │  │
-│  │  │   Channel     │───▶│  Security Layer                          │   │  │
-│  │  │   Interface   │    │  - User allowlist                        │   │  │
-│  │  │              │    │  - Group restriction                     │   │  │
-│  │  │  Telegram     │    │  - DM blocking                           │   │  │
-│  │  │  (polling)    │    │  - Secret prefix                        │   │  │
-│  │  │              │    │  - Topic restriction                     │   │  │
-│  │  │  Future:      │    └──────────────────────────────────────────┘   │  │
-│  │  │  Discord      │                     │                             │  │
-│  │  │  Slack        │                     ▼                             │  │
-│  │  │  CLI          │    ┌──────────────────────────────────────────┐   │  │
-│  │  └──────────────┘    │  Middle Manager Intelligence             │   │  │
-│  │                      │  - Understand user intent                │   │  │
-│  │                      │  - Pick best model for task              │   │  │
-│  │                      │  - Delegate to agents (/delegate /fleet) │   │  │
-│  │                      │  - Route to correct machine              │   │  │
-│  │                      └──────────────────────────────────────────┘   │  │
+│  │  │   Telegram     │───▶│  Security Layer                          │   │  │
+│  │  │   Client       │    │  - User allowlist (fail-closed)          │   │  │
+│  │  │   (polling)    │    │  - Group restriction                     │   │  │
+│  │  │               │    │  - DM blocking                           │   │  │
+│  │  │               │    │  - Secret prefix                        │   │  │
+│  │  │               │    │  - Topic restriction                     │   │  │
+│  │  └──────────────┘    └──────────────────────────────────────────┘   │  │
 │  │                                   │                                  │  │
 │  │                                   ▼                                  │  │
-│  │  ┌──────────────────────────────────────────────────────────────┐   │  │
-│  │  │  Session Mapper        │  Copilot CLI                        │   │  │
-│  │  │  sessions.sqlite       │  copilot --resume <id> -p "prompt"  │   │  │
-│  │  │                        │                                     │   │  │
-│  │  │  chat_id,thread_id     │  Features:                          │   │  │
-│  │  │    → session UUID      │  - /delegate (background agents)    │   │  │
-│  │  │    → machine_id        │  - /fleet (parallel agents)         │   │  │
-│  │  │                        │  - /plan, /compact, /research       │   │  │
-│  │  │                        │  - web_search, code editing, shell  │   │  │
-│  │  │                        │                                     │   │  │
-│  │  │                        │  Chronicle (memory):                │   │  │
-│  │  │                        │  ~/.copilot/session-state/          │   │  │
-│  │  └──────────────────────────────────────────────────────────────┘   │  │
+│  │                      ┌──────────────────────────────────────────┐   │  │
+│  │                      │  👀 Acknowledge → Copilot CLI Execution   │   │  │
+│  │                      │                                          │   │  │
+│  │                      │  LLM-Driven Routing (natural language): │   │  │
+│  │                      │  - LLM responds naturally to user        │   │  │
+│  │                      │  - Emits json:ghclaw-action blocks       │   │  │
+│  │                      │  - daemon parses + executes actions      │   │  │
+│  │                      └──────────────────────────────────────────┘   │  │
+│  │                                   │                                  │  │
+│  │                      ┌────────────┼────────────────┐                │  │
+│  │                      ▼            ▼                ▼                │  │
+│  │  ┌──────────────┐  ┌──────────┐  ┌──────────────────────┐         │  │
+│  │  │ Action        │  │ Copilot  │  │ Copilot Coding Agent │         │  │
+│  │  │ Handlers      │  │ CLI      │  │ (Enterprise API)     │         │  │
+│  │  │               │  │          │  │                      │         │  │
+│  │  │ - Reminders   │  │ --resume │  │ Creates tasks →      │         │  │
+│  │  │ - Schedules   │  │ -p       │  │ autonomous PRs       │         │  │
+│  │  │ - Sessions    │  │ --silent │  │                      │         │  │
+│  │  │ - gh-aw       │  │ /fleet   │  │ gh-aw for scheduled  │         │  │
+│  │  │ - Status      │  │ /plan    │  │ agentic workflows    │         │  │
+│  │  └──────────────┘  └──────────┘  └──────────────────────┘         │  │
 │  │                                   │                                  │  │
 │  │                                   ▼                                  │  │
 │  │  ┌──────────────┐    ┌──────────────────────────────────┐          │  │
-│  │  │  Streaming   │──▶ │  Channel.send() / Channel.edit() │          │  │
-│  │  │  Response    │    └──────────────────────────────────┘          │  │
-│  │  └──────────────┘                                                   │  │
+│  │  │  Streaming    │──▶ │  Telegram: send / edit messages   │          │  │
+│  │  │  Response     │    │  (action blocks hidden from user) │          │  │
+│  │  └──────────────┘    └──────────────────────────────────┘          │  │
 │  └──────────────────────────────────────────────────────────────────────┘  │
 │                                                                            │
 │  ┌───────────────────┐    ┌────────────────────────────┐                  │
@@ -62,34 +61,38 @@ ghclaw is a local middle manager AI that bridges Telegram to GitHub Copilot CLI'
 
 ## Key Design Decisions
 
-### 1. Channel Abstraction
+### 1. LLM-Driven Natural Language Routing
 
-**Why:** ghclaw should work with any messaging platform, not just Telegram.
+**Why:** Slash commands force users to memorize syntax. Natural language is more flexible. Three minimal commands remain (`/start`, `/help`, `/new`) for Telegram UI integration.
 
-**How:** A `Channel` interface defines the contract:
+**How:** The system prompt (`instructions.md`) describes available actions using a structured `json:ghclaw-action` block format. The LLM decides what action to take and emits a fenced code block:
 
-```typescript
-interface Channel {
-  getInfo(): Promise<ChannelInfo>;      // Capabilities (threading, editing, max length)
-  poll(timeout?: number): Promise<ChannelMessage[]>;  // Receive messages
-  send(chatId, text, options?): Promise<SentMessage>;  // Send message
-  edit(chatId, messageId, text): Promise<void>;        // Edit for streaming
-  sendTyping(chatId): Promise<void>;                    // Activity indicator
-  start(): Promise<void>;                               // Connect/verify
-  stop(): Promise<void>;                                // Cleanup
-}
+```
+User: "remind me tomorrow at 9am to deploy v2"
+
+LLM response:
+"Setting a reminder for tomorrow at 9am to deploy v2."
+
+```json:ghclaw-action
+{"action": "create_reminder", "message": "deploy v2", "schedule": "tomorrow 9am EST"}
+```
 ```
 
-**`TelegramChannel`** wraps the existing `TelegramClient`. The core daemon logic works with `Channel` and `ChannelMessage`, not Telegram-specific types.
+The daemon:
+1. Streams the LLM response to Telegram (hiding action blocks from display)
+2. Parses action blocks from the full response text
+3. Validates actions against a strict schema (allowlisted action types + fields)
+4. Executes validated actions via handlers
+5. Sends action results as follow-up messages
 
-**Future channels** implement the same interface. The `streamToChannel()` helper works with any `Channel` that supports editing.
+**14 action types:** `create_reminder`, `list_reminders`, `cancel_reminder`, `create_schedule`, `list_schedules`, `cancel_schedule`, `create_coding_task`, `create_agentic_schedule`, `list_sessions`, `search_sessions`, `resume_session`, `new_session`, `show_status`, `show_github_status`.
 
 ### 2. GitHub as Backbone
 
 **Why:** Cross-machine state requires a shared store. GitHub provides:
 - Private repos for data
 - Actions for compute (reminders, schedules)
-- Issues for Copilot Coding Agent
+- Copilot Coding Agent for autonomous PRs
 - Secrets for credentials
 - Already authenticated via `gh` CLI
 
@@ -102,25 +105,33 @@ interface Channel {
 
 Sync loop runs every 5 seconds: `git pull → export → commit/push if changed`.
 
-### 3. Middle Manager Intelligence
+### 3. Copilot Coding Agent (Enterprise API)
 
-**Why:** A bot that just forwards messages to Copilot CLI wastes its potential. ghclaw should understand what the user needs and pick the best approach.
+**Why:** Some coding tasks are best handled autonomously (create PR without local compute).
 
-**How:** The system prompt instructs Copilot CLI to:
-- Pick the right model (fast for simple tasks, powerful for complex)
-- Use `/delegate` for background coding work
-- Use `/fleet` for parallel multi-file changes
-- Enter `/plan` mode for complex tasks
-- Suggest `/remind` and `/schedule` for recurring needs
-- Create GitHub Issues for Copilot Coding Agent tasks
+**How:** `src/copilot/agent.ts` calls `https://api.enterprise.githubcopilot.com`:
+- `POST /agents/repos/{owner}/{repo}/tasks` — create task
+- `GET /agents/repos/{owner}/{repo}/tasks/{taskID}` — poll status
+- Auth: `Bearer {gh_token}` + `Copilot-Integration-Id: vscode-chat`
+- Owner/repo validated against GitHub's character rules before URL construction
 
-### 4. Polling, Not Webhooks
+### 4. gh-aw (Agentic Workflows)
+
+**Why:** Recurring tasks that need LLM capabilities (e.g., "every Monday review open PRs").
+
+**How:** `src/ghaw/executor.ts` wraps the `gh aw` CLI extension:
+- `ghAwNew(repoPath, name)` — create workflow markdown
+- `ghAwCompile(repoPath)` — compile to Actions YAML
+- Uses `Bun.spawn` with argv arrays (no shell interpolation)
+- Workflow names validated (alphanumeric + hyphens only)
+
+### 5. Polling, Not Webhooks
 
 **Why:** Webhooks require exposing a public endpoint (firewall, HTTPS, security).
 
 **How:** Long-poll Telegram's `getUpdates` API. All connections outbound.
 
-### 5. Delegate Memory to Copilot CLI
+### 6. Delegate Memory to Copilot CLI
 
 **Why:** Copilot CLI's Chronicle already manages sessions, turns, checkpoints, and context compaction.
 
@@ -129,49 +140,68 @@ Sync loop runs every 5 seconds: `git pull → export → commit/push if changed`
 Telegram (chat_id, thread_id) → Copilot session UUID + machine_id
 ```
 
-### 6. OS Keychain for Secrets
+### 7. OS Keychain for Secrets
 
 **Why:** Environment variables and `.env` files leak easily.
 
 **How:** Native OS keychain (macOS Keychain, Linux libsecret, Windows Credential Manager). Fallback to env vars only when keychain unavailable.
+
+### 8. Message Acknowledgment
+
+**Why:** Users need immediate feedback that ghclaw received their message.
+
+**How:** 👀 emoji reaction via Telegram's `setMessageReaction` API on receipt. Cleared after response is sent. Best-effort (non-blocking).
 
 ## Data Flow
 
 ### Message Processing
 
 ```
-1. Channel.poll()
-   └─▶ Telegram getUpdates (long polling, 30s timeout)
+1. Telegram long-poll (getUpdates, 30s timeout)
 
 2. Security Check (BEFORE any logging)
-   ├─▶ User allowlist
+   ├─▶ Fail-closed: reject if no access controls configured
    ├─▶ Group restriction
+   ├─▶ User allowlist
    ├─▶ DM blocking
    ├─▶ Secret prefix strip
-   └─▶ REJECT if any fails
+   └─▶ Topic restriction
+   → REJECT if any fails (no content logged for rejected messages)
 
-3. Session Lookup
+3. Acknowledge receipt (👀 reaction)
+
+4. Check /start, /help, /new commands (only 3 registered)
+
+5. Check session selection (number reply after session list)
+
+6. Session Lookup
    ├─▶ getOrCreateSession(chatId, threadId)
    ├─▶ Check machine_id ownership
    └─▶ Wrong machine → redirect notice, STOP
 
-4. Middle Manager Routing
-   ├─▶ Build system prompt with discovered capabilities
-   ├─▶ Include agent delegation instructions
-   └─▶ Pass to Copilot CLI with best model
+7. Auto-create forum topic (if in main chat of forum group)
+   └─▶ AI-generated topic title (background)
 
-5. Copilot Execution
+8. Build system prompt
+   ├─▶ Load instructions.md (action block format + available actions)
+   └─▶ Append Copilot CLI discovered capabilities
+
+9. Copilot CLI Execution
    ├─▶ copilot --resume <session-id> -p "prompt" --silent
-   ├─▶ Stream stdout to response buffer
-   └─▶ May invoke /delegate, /fleet, tools
+   └─▶ Stream stdout via streamToTelegramCollecting()
 
-6. Channel.send() / Channel.edit()
-   ├─▶ Create message with typing cursor (▌)
-   ├─▶ Edit as chunks arrive (300ms throttle)
-   └─▶ Final edit with complete response
+10. Stream to Telegram
+    ├─▶ Create message with typing cursor (▌)
+    ├─▶ Edit as chunks arrive (300ms throttle)
+    ├─▶ Hide json:ghclaw-action blocks from display
+    └─▶ Final edit with complete response
 
-7. Session Update
-   └─▶ Update last_activity and message_count
+11. Parse + Execute Actions
+    ├─▶ parseActionBlocks(fullText) → extract action JSON
+    ├─▶ Validate against schema (allowlisted types + fields)
+    └─▶ executeAction() → handler result sent as follow-up
+
+12. Clear 👀 reaction
 ```
 
 ### GitHub Sync
@@ -187,13 +217,15 @@ Every 5 seconds:
 ### Reminder Flow
 
 ```
-1. User: /remind tomorrow 9am deploy v2
-2. ghclaw parses with NLP (Copilot CLI) or keyword fallback
-3. Creates .github/workflows/remind-{id}.yml with cron schedule
-4. git commit && push
-5. GitHub Actions fires at scheduled time
-6. Workflow sends Telegram message via bot token secret
-7. Workflow self-deletes its own YAML file
+1. User: "remind me tomorrow 9am to deploy v2"
+2. LLM outputs: conversational response + json:ghclaw-action block
+3. daemon parses action: {action: "create_reminder", message: "deploy v2", schedule: "tomorrow 9am EST"}
+4. Handler parses schedule via Copilot CLI NLP → cron expression
+5. Creates .github/workflows/remind-{id}.yml
+6. git commit && push
+7. GitHub Actions fires at scheduled time
+8. Workflow sends Telegram message via bot token secret
+9. Workflow self-deletes its own YAML file
 ```
 
 ## File Structure
@@ -204,7 +236,7 @@ Every 5 seconds:
 ├── daemon.lock           # PID file when daemon running
 ├── daemon.log            # Daemon output
 ├── data/
-│   └── sessions.sqlite   # Telegram → Copilot session mapping
+│   └── sessions.sqlite   # Telegram → Copilot session mapping + synced Chronicle IDs
 └── repo/                 # Git clone of {user}/.ghclaw
     ├── memory/
     │   ├── sessions.json
@@ -225,18 +257,26 @@ Every 5 seconds:
 
 ```
 src/
-├── channels/             # Channel abstraction layer
+├── actions/              # LLM action block system
+│   ├── types.ts          # 14 action types with typed payloads
+│   ├── parser.ts         # Regex extraction + JSON parsing + schema validation
+│   ├── handlers.ts       # Action dispatch + per-action handlers
+│   └── index.ts          # Barrel exports
+├── channels/             # Channel abstraction (unused — daemon uses TelegramClient directly)
 │   ├── channel.ts        # Channel interface, types, streamToChannel()
 │   ├── telegram.ts       # TelegramChannel implements Channel
 │   └── index.ts          # Barrel exports
 ├── telegram/
-│   ├── client.ts         # Low-level Telegram API client
-│   ├── security.ts       # Security checks (allowlist, group, DM, prefix)
-│   └── commands.ts       # Bot command handlers (/sessions, /remind, etc.)
+│   ├── client.ts         # Low-level Telegram API client (send, edit, react, topics)
+│   ├── security.ts       # Security checks (fail-closed, allowlist, group, DM, prefix, topic)
+│   └── commands.ts       # Minimal command handlers (/start, /help, /new only)
 ├── copilot/
 │   ├── session.ts        # Copilot CLI execution (--resume, -p, streaming)
 │   ├── discovery.ts      # Feature discovery (tools, commands, models, agents)
-│   └── chronicle.ts      # Read Copilot CLI's Chronicle session data
+│   ├── chronicle.ts      # Read Copilot CLI's Chronicle session data
+│   └── agent.ts          # Copilot Coding Agent enterprise API client
+├── ghaw/
+│   └── executor.ts       # gh-aw CLI wrapper (init, new, compile, run, list)
 ├── github/
 │   ├── auth.ts           # Centralized gh CLI auth, scope checking
 │   ├── repo.ts           # Repo provisioning, git operations
@@ -246,15 +286,15 @@ src/
 │   ├── parser.ts         # NLP schedule parsing via Copilot CLI
 │   ├── reminders.ts      # Reminder CRUD (workflow files)
 │   ├── recurring.ts      # Recurring schedule CRUD
-│   └── agent.ts          # Copilot Coding Agent (GitHub Issues)
+│   └── agent.ts          # Copilot Coding Agent fallback (gh issue create)
 ├── memory/
-│   └── session-mapper.ts # SQLite session mapping
+│   └── session-mapper.ts # SQLite session mapping + synced Chronicle IDs
 ├── secrets/
 │   └── keychain.ts       # OS keychain abstraction
 ├── config.ts             # Config loading (keychain + local file)
-├── daemon.ts             # Main daemon (polling, processing, system prompt)
+├── daemon.ts             # Main daemon (polling, processing, action execution)
 └── cli/
-    ├── setup.ts          # Interactive setup wizard
+    ├── setup.ts          # Interactive setup wizard (includes gh-aw init)
     └── doctor.ts         # Health checks
 ```
 
@@ -278,12 +318,13 @@ All machines poll the same group. When a message arrives:
 
 See [Security](security.md) for the detailed security model.
 
-Five layers:
+Six layers:
 1. **Network**: All outbound, no exposed ports
-2. **Access Control**: User allowlist, group restriction, DM blocking, secret prefix, topic restriction
-3. **Data**: Secrets in OS keychain, error messages sanitized, no logging before security check
-4. **GitHub**: Private repo, repo-level secrets for Actions, `repo`+`workflow` scopes required
-5. **Process**: Restrictive file permissions, clean error handling
+2. **Access Control**: Fail-closed default, user allowlist, group restriction, DM blocking, secret prefix, topic restriction
+3. **Action Validation**: Schema validation, type allowlist, field sanitization, URL encoding
+4. **Data**: Secrets in OS keychain, error messages sanitized, no logging before security check
+5. **GitHub**: Private repo, repo-level secrets for Actions, `repo`+`workflow` scopes required
+6. **Process**: Restrictive file permissions, clean error handling, capped output reads
 
 ## YOLO Mode
 
@@ -294,3 +335,16 @@ When enabled (`copilot.yoloMode: true`), passes `--allow-all-tools` to Copilot C
 - All MCP tools
 
 **Default: OFF.**
+
+## Installation
+
+One-liner install:
+```bash
+curl -fsSL https://raw.githubusercontent.com/yaananth/ghclaw/main/install.sh | bash
+```
+
+Or manual:
+```bash
+git clone https://github.com/yaananth/ghclaw.git
+cd ghclaw && bun install && bun link
+```

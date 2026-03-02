@@ -47,6 +47,55 @@ export interface CreateTaskResult {
 }
 
 // ============================================================================
+// Validation
+// ============================================================================
+
+/**
+ * GitHub owner/repo name regex.
+ * Allows alphanumeric, hyphens, dots, and underscores.
+ * Must start with alphanumeric. Max lengths enforced.
+ */
+const GITHUB_NAME_REGEX = /^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?$/;
+const MAX_OWNER_LENGTH = 39;
+const MAX_REPO_LENGTH = 100;
+
+function validateGitHubName(value: string, label: string, maxLen: number): string {
+  if (!value || value.length > maxLen) {
+    throw new Error(`Invalid ${label}: must be 1-${maxLen} characters`);
+  }
+  if (!GITHUB_NAME_REGEX.test(value)) {
+    throw new Error(`Invalid ${label}: contains disallowed characters`);
+  }
+  // Extra safety: no path traversal or URL-breaking chars
+  if (value.includes('..') || value.includes('/') || value.includes('%')) {
+    throw new Error(`Invalid ${label}: contains path traversal characters`);
+  }
+  return value;
+}
+
+/**
+ * Validate an API-returned ID (task or session).
+ * These come from Copilot API responses, not user input, but defense-in-depth.
+ */
+const API_ID_REGEX = /^[a-zA-Z0-9_-]{1,128}$/;
+
+function validateApiId(value: string, label: string): string {
+  if (!value || !API_ID_REGEX.test(value)) {
+    throw new Error(`Invalid ${label} ID format`);
+  }
+  return value;
+}
+
+/**
+ * Build a safe API URL with validated and encoded path segments.
+ */
+function buildApiUrl(pathSegments: string[]): string {
+  const base = getBaseUrl().replace(/\/+$/, '');
+  const encodedPath = pathSegments.map(s => encodeURIComponent(s)).join('/');
+  return `${base}/${encodedPath}`;
+}
+
+// ============================================================================
 // API Client
 // ============================================================================
 
@@ -74,7 +123,9 @@ export async function createCodingAgentTask(
   repo: string,
   description: string,
 ): Promise<CreateTaskResult> {
-  const url = `${getBaseUrl()}/agents/repos/${owner}/${repo}/tasks`;
+  const safeOwner = validateGitHubName(owner, 'owner', MAX_OWNER_LENGTH);
+  const safeRepo = validateGitHubName(repo, 'repo', MAX_REPO_LENGTH);
+  const url = buildApiUrl(['agents', 'repos', safeOwner, safeRepo, 'tasks']);
   const headers = await getHeaders();
 
   const response = await fetch(url, {
@@ -95,9 +146,12 @@ export async function createCodingAgentTask(
   const data = await response.json() as { task: CopilotTask };
   const task = data.task;
 
+  // Validate API-returned IDs before propagating
+  const validatedTaskId = validateApiId(task.id, 'task');
+
   let sessionId: string | null = null;
   if (task.sessions?.length > 0) {
-    sessionId = task.sessions[0].id;
+    sessionId = validateApiId(task.sessions[0].id, 'session');
   }
 
   // Poll for session ID if not immediately available (up to 3 attempts, 2s apart)
@@ -105,9 +159,9 @@ export async function createCodingAgentTask(
     for (let i = 0; i < 3; i++) {
       await new Promise(r => setTimeout(r, 2000));
       try {
-        const updated = await getTask(owner, repo, task.id);
+        const updated = await getTask(owner, repo, validatedTaskId);
         if (updated.sessions?.length > 0) {
-          sessionId = updated.sessions[0].id;
+          sessionId = validateApiId(updated.sessions[0].id, 'session');
           break;
         }
       } catch {
@@ -117,7 +171,7 @@ export async function createCodingAgentTask(
   }
 
   return {
-    taskId: task.id,
+    taskId: validatedTaskId,
     sessionId,
     status: task.status,
   };
@@ -131,7 +185,9 @@ export async function getTask(
   repo: string,
   taskId: string,
 ): Promise<CopilotTask> {
-  const url = `${getBaseUrl()}/agents/repos/${owner}/${repo}/tasks/${taskId}`;
+  const safeOwner = validateGitHubName(owner, 'owner', MAX_OWNER_LENGTH);
+  const safeRepo = validateGitHubName(repo, 'repo', MAX_REPO_LENGTH);
+  const url = buildApiUrl(['agents', 'repos', safeOwner, safeRepo, 'tasks', validateApiId(taskId, 'task')]);
   const headers = await getHeaders();
 
   const response = await fetch(url, {
@@ -156,7 +212,8 @@ export async function postCommand(
   sessionId: string,
   content: string,
 ): Promise<string> {
-  const url = `${getBaseUrl()}/agents/sessions/${sessionId}/commands`;
+  const safeSessionId = validateApiId(sessionId, 'session');
+  const url = buildApiUrl(['agents', 'sessions', safeSessionId, 'commands']);
   const headers = await getHeaders();
 
   const response = await fetch(url, {

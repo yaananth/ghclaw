@@ -156,16 +156,16 @@ export function getSecuritySetupInstructions(): string {
 2. Or check the logs when you message your bot
 
 ### 4. Configure Security
-Add to your .env:
-  TELEGRAM_ALLOWED_GROUP_ID=<your_group_id>
-  TELEGRAM_ALLOWED_USER_IDS=<your_user_id>,<other_user_id>
+Store via OS keychain:
+  ghclaw secrets set telegram-allowed-group <your_group_id>
+  ghclaw secrets set telegram-allowed-users <your_user_id>,<other_user_id>
 
 ### 5. Optional: Secret Prefix
 Add a secret prefix that must start every message:
-  TELEGRAM_SECRET_PREFIX=/secret mypassword
+  ghclaw secrets set telegram-secret-prefix "!ai"
 
 ### 6. Topics/Threads (Optional)
-If using forum topics, restrict to specific topics:
-  TELEGRAM_ALLOWED_TOPIC_IDS=123,456
+If using forum topics, restrict to specific topics via config.json:
+  "telegram": { "allowedTopicIds": [123, 456] }
 `.trim();
 }

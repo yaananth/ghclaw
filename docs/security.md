@@ -1,6 +1,6 @@
 # Security Model
 
-This document details ghclaw's security architecture. ghclaw is designed for personal use on private machines with defense-in-depth across network, access control, data protection, GitHub integration, and process security.
+This document details ghclaw's security architecture. ghclaw is designed for personal use on private machines with defense-in-depth across network, access control, data protection, GitHub integration, action validation, and process security.
 
 ## Threat Model
 
@@ -8,9 +8,13 @@ This document details ghclaw's security architecture. ghclaw is designed for per
 
 | Threat | Mitigation |
 |--------|------------|
-| Unauthorized Telegram users invoking the bot | User allowlist + group restriction + DM blocking |
+| Unauthorized Telegram users invoking the bot | User allowlist + group restriction + DM blocking (fail-closed) |
 | Bot token exposure | OS keychain storage, never in files or env |
 | Prompt injection via Telegram messages | Role marker stripping, session name sanitization |
+| LLM output manipulation (action block injection) | Schema validation, action type allowlist, field validation |
+| Unauthorized repo targeting via LLM | Owner/repo regex validation, URL-safe encoding |
+| YAML injection via reminder/schedule text | Control character stripping, length limits, field quoting |
+| Command injection via gh-aw | Argv-only spawn (no shell), subcommand allowlist, name validation |
 | Secrets in logs | Security check runs BEFORE any logging; long tokens redacted |
 | Exposed network surface | All connections outbound (polling), no webhooks, no open ports |
 | Cross-machine session hijacking | Machine ID ownership, soft-routing redirects |
@@ -26,6 +30,7 @@ This document details ghclaw's security architecture. ghclaw is designed for per
 - GitHub's infrastructure being compromised
 - Copilot CLI vulnerabilities (ghclaw is a thin layer on top)
 - Social engineering of the bot operator
+- Sophisticated prompt injection that bypasses LLM instruction-following (defense in depth mitigates impact)
 
 ## Security Layers
 
@@ -36,10 +41,12 @@ This document details ghclaw's security architecture. ghclaw is designed for per
 | Connection | Direction | Protocol | Destination |
 |------------|-----------|----------|-------------|
 | Telegram polling | Outbound | HTTPS | api.telegram.org |
-| Telegram send/edit | Outbound | HTTPS | api.telegram.org |
+| Telegram send/edit/react | Outbound | HTTPS | api.telegram.org |
 | GitHub sync | Outbound | HTTPS (git) | github.com |
 | GitHub API | Outbound | HTTPS | api.github.com |
+| Copilot Agent API | Outbound | HTTPS | api.enterprise.githubcopilot.com |
 | Copilot CLI | Local | stdin/stdout | Subprocess |
+| gh-aw CLI | Local | stdin/stdout | Subprocess |
 
 **No webhooks.** Telegram webhooks require exposing a public HTTPS endpoint. ghclaw uses long-polling instead, which is outbound-only.
 
@@ -47,9 +54,13 @@ This document details ghclaw's security architecture. ghclaw is designed for per
 
 ### Layer 2: Access Control
 
-Five independent access control mechanisms, all enabled by default:
+Six independent access control mechanisms:
 
-#### 2a. Group Restriction
+#### 2a. Fail-Closed Default
+
+If no access controls are configured (no `allowedGroupId` and no `allowedUserIds`), **all messages are rejected**. This prevents the bot from being open if setup is incomplete.
+
+#### 2b. Group Restriction
 
 Bot only responds in a specific Telegram group.
 
@@ -60,7 +71,7 @@ Secret: telegram-allowed-group
 
 Messages from other groups or unknown chats are silently dropped (no response, no logging of content).
 
-#### 2b. User Allowlist
+#### 2c. User Allowlist
 
 Bot only responds to specific user IDs.
 
@@ -71,7 +82,7 @@ Secret: telegram-allowed-users
 
 Comma-separated list. Messages from non-allowed users are blocked with a log entry containing only the user ID (no message content).
 
-#### 2c. DM Blocking
+#### 2d. DM Blocking
 
 Private messages are blocked by default.
 
@@ -81,7 +92,7 @@ Config: telegram.blockPrivateMessages (default: true)
 
 The bot ignores all private/direct messages entirely.
 
-#### 2d. Secret Prefix
+#### 2e. Secret Prefix
 
 Optional: require a secret phrase prefix on every message.
 
@@ -91,7 +102,7 @@ Secret: telegram-secret-prefix
 
 Messages without the prefix are silently ignored. The prefix is stripped before processing.
 
-#### 2e. Topic Restriction
+#### 2f. Topic Restriction
 
 Optional: restrict to specific forum topic IDs.
 
@@ -104,17 +115,55 @@ Messages in non-allowed topics are ignored.
 #### Access Control Evaluation Order
 
 ```
-1. Is message from an allowed group? → NO → Drop (silent)
-2. Is sender in user allowlist?       → NO → Drop (log user ID only)
-3. Is this a DM and DMs blocked?     → YES → Drop (silent)
-4. Is secret prefix present?          → NO → Drop (silent)
-5. Is topic in allowed list?          → NO → Drop (silent)
-6. ✅ Message passes all checks → proceed to processing
+1. Is this a DM and DMs blocked?           → YES → Drop (silent)
+2. Are any access controls configured?      → NO  → Drop (fail-closed)
+3. Is message from an allowed group?        → NO  → Drop (silent)
+4. Is sender in user allowlist?             → NO  → Drop (log user ID only)
+5. Is topic in allowed list?                → NO  → Drop (silent)
+6. Is secret prefix present?                → NO  → Drop (silent)
+7. ✅ Message passes all checks → proceed to processing
 ```
 
 **Important:** All security checks run BEFORE any content logging. Message text is never logged for rejected messages.
 
-### Layer 3: Data Security
+### Layer 3: Action Validation (LLM Trust Boundary)
+
+**LLM output is treated as untrusted input.** The action block system has multiple validation layers:
+
+#### 3a. Schema Validation
+
+All action blocks must pass strict validation:
+- `action` field must be one of 14 allowlisted types
+- Only known fields are accepted per action type (unknown keys rejected)
+- String fields have maximum length limits
+- Required fields must be present and non-empty
+
+#### 3b. Owner/Repo Validation
+
+For `create_coding_task` actions targeting GitHub repos:
+- Owner and repo validated against GitHub's character rules: `[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?`
+- Maximum 39 chars for owner, 100 chars for repo
+- No path traversal characters (`..`, `/`, `%`)
+- API-returned IDs (task, session) validated against `[a-zA-Z0-9_-]{1,128}`
+- URL segments encoded with `encodeURIComponent`
+
+#### 3c. Schedule/Reminder Text Sanitization
+
+Text fields passed to YAML generators are sanitized:
+- Control characters (newlines, tabs, null bytes) stripped
+- YAML-significant characters (`---`, `:`, `#`, `>`, `|`, `*`, `&`, `!`, `%`) escaped
+- Maximum field lengths enforced
+- Output YAML validated before writing
+
+#### 3d. Workflow Name Validation
+
+gh-aw workflow names are validated:
+- Only lowercase alphanumeric + hyphens
+- No leading hyphens or dots
+- Maximum 30 characters
+- Passed as argv element (no shell interpolation)
+
+### Layer 4: Data Security
 
 #### Secret Storage
 
@@ -179,7 +228,7 @@ safeName = session.name
 
 This prevents prompt injection via Telegram topic names or session names.
 
-### Layer 4: GitHub Integration Security
+### Layer 5: GitHub Integration Security
 
 #### Private Repository
 
@@ -211,6 +260,15 @@ Sensitive values for GitHub Actions are stored as **repo-level secrets**, never 
 
 Secrets are set via `gh secret set` which encrypts with NaCl sealed boxes (Curve25519 + XSalsa20-Poly1305).
 
+#### Copilot Agent API Security
+
+The Copilot Coding Agent API (`src/copilot/agent.ts`):
+- Auth via `Bearer {gh_token}` (reuses existing `gh` CLI token)
+- Token passed via `getGhToken()`, never in argv or logs
+- URL path segments validated and encoded
+- HTTP timeout enforced (30s)
+- Response body truncated before error messages (200 char limit)
+
 #### Workflow Security
 
 Reminder and schedule workflows:
@@ -228,7 +286,7 @@ The git sync loop:
 - Uses `--rebase` for pulls to avoid merge commits
 - Non-blocking — sync errors are logged but never crash the daemon
 
-### Layer 5: Process Security
+### Layer 6: Process Security
 
 #### File Permissions
 
@@ -243,6 +301,7 @@ The git sync loop:
 Single-instance enforcement via PID file:
 - Created with exclusive flag (`wx`) on startup
 - PID validated against running processes (stale locks cleaned up)
+- Invalid PIDs detected and cleaned
 - Removed on graceful shutdown (SIGINT, SIGTERM)
 
 #### Copilot CLI Invocation
@@ -255,6 +314,17 @@ copilot --resume <session-id> -p "prompt" --silent
 - Prompts passed via `-p` flag (Copilot CLI handles securely)
 - `--silent` suppresses interactive UI elements
 - Process stdout is streamed, not buffered entirely in memory
+
+#### gh-aw Invocation
+
+```typescript
+Bun.spawn(['gh', 'aw', ...args], { cwd: repoPath, stdout: 'pipe', stderr: 'pipe' })
+```
+
+- Argv array, never shell string interpolation
+- Allowlisted subcommands only: `init`, `new`, `compile`, `run`, `list`
+- Fixed working directory (`cwd: repoPath`)
+- stdout/stderr captured (not inherited)
 
 #### Signal Handling
 
@@ -275,20 +345,20 @@ The daemon handles SIGINT and SIGTERM for graceful shutdown:
 - [ ] YOLO mode is OFF unless explicitly needed (`copilot.yoloMode: false`)
 - [ ] Bot token not committed to any repo (check with `git log --all -p | grep -c "bot token pattern"`)
 
-## Security Comparison: ghclaw vs openclawd
-
-ghclaw was designed specifically to address security concerns:
+## Security Comparison: ghclaw vs Alternatives
 
 | Feature | ghclaw | Typical open alternatives |
 |---------|---------|--------------------------|
 | Secret storage | OS keychain | `.env` files or env vars |
 | Network exposure | Outbound only (polling) | Webhooks (inbound HTTPS) |
-| Access control | 5 layers, all default-on | Often optional or minimal |
+| Access control | 6 layers, fail-closed default | Often optional or minimal |
+| LLM output validation | Schema + allowlist + field validation | Often unprotected |
 | Log sanitization | Before any logging | Often logs first, filters later |
 | GitHub secrets | Repo-level, encrypted | Often in workflow YAML |
 | Private by default | Yes (private repo) | Varies |
-| Prompt injection defense | Role marker stripping | Often unprotected |
+| Prompt injection defense | Role marker stripping, name sanitization | Often unprotected |
 | Error disclosure | Sanitized (paths, tokens redacted) | Often verbose |
+| Process spawning | Argv array, no shell | Often shell interpolation |
 
 ## Incident Response
 

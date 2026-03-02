@@ -14,6 +14,7 @@ ghclaw has a deliberate three-tier memory architecture: a thin local mapping lay
 │  │  Telegram (chat_id, thread_id) → Copilot session UUID       │  │
 │  │  + machine_id (which machine owns this session)              │  │
 │  │  + machine_name, topic_id, status, message_count             │  │
+│  │  + synced_chronicle_sessions (persisted sync tracking)       │  │
 │  └─────────────────────────────────────────────────────────────┘  │
 │  Size: typically < 100 KB                                          │
 │                                                                    │
@@ -45,7 +46,7 @@ ghclaw has a deliberate three-tier memory architecture: a thin local mapping lay
 
 ### Why Three Tiers?
 
-- **Tier 1 (SQLite)**: Fast local lookups. Maps Telegram → Copilot sessions without duplicating history.
+- **Tier 1 (SQLite)**: Fast local lookups. Maps Telegram → Copilot sessions without duplicating history. Also persists Chronicle sync tracking (survives daemon restarts).
 - **Tier 2 (Chronicle)**: Copilot CLI's built-in session management. Full conversation history, tools, checkpoints. ghclaw reads it but never writes directly.
 - **Tier 3 (GitHub)**: Cross-machine visibility. Any machine can see sessions from other machines. Also powers reminders and schedules via GitHub Actions.
 
@@ -66,6 +67,11 @@ CREATE TABLE sessions (
   topic_id INTEGER,                 -- Auto-created Telegram topic ID
   machine_id TEXT,                  -- UUID of owning machine
   machine_name TEXT                 -- Human-readable machine name
+);
+
+CREATE TABLE synced_chronicle_sessions (
+  session_id TEXT PRIMARY KEY,      -- Chronicle session ID
+  synced_at TEXT NOT NULL           -- When it was synced
 );
 ```
 
@@ -93,10 +99,10 @@ CREATE TABLE sessions (
 ```
 
 ghclaw reads Chronicle to:
-- Display session summaries (`/sessions`, `/active`)
+- Display session summaries (via `list_sessions` action)
 - Build topic names for forum groups
-- Search sessions (`/search`)
-- Show context when switching sessions (`/resume`)
+- Search sessions (via `search_sessions` action)
+- Show context when switching sessions (via `resume_session` action)
 
 ## Tier 3: GitHub Sync
 
@@ -132,31 +138,32 @@ Errors are logged but never crash the daemon. The sync loop is non-blocking.
 
 ghclaw acts as a middle manager, delegating work through multiple agent mechanisms:
 
-### /delegate (Background Agents)
+### Copilot CLI (Local)
 
-Copilot CLI's `/delegate` command spawns background coding agents:
-- Fork tasks to run in parallel while the main conversation continues
-- Great for "fix this bug while I work on something else"
-- Agent results appear when complete
+Copilot CLI provides built-in agent capabilities:
+- `/delegate` — Background coding agents
+- `/fleet` — Parallel multi-file agents
+- `/plan` — Complex task planning
+- `/research` — Deep research with GitHub search
 
-### /fleet (Parallel Agents)
+### Copilot Coding Agent (Remote)
 
-Copilot CLI's `/fleet` runs multiple agents simultaneously:
-- Different agents work on different files/tasks
-- Results aggregated when all complete
-- Ideal for multi-file refactoring
-
-### Copilot Coding Agent (GitHub Issues)
-
-The `/agent` Telegram command creates a GitHub Issue assigned to `@copilot`:
-- Copilot Coding Agent picks up the issue
-- Works autonomously on the codebase
+Via the enterprise API (`src/copilot/agent.ts`):
+- Creates tasks assigned to Copilot Coding Agent
+- Agent works autonomously on the codebase
 - Creates a PR when done
 - No local compute needed
 
+### gh-aw (Agentic Workflows)
+
+Via `gh aw` CLI extension (`src/ghaw/executor.ts`):
+- Defines workflows in markdown → compiles to GitHub Actions YAML
+- Runs LLM agents in sandboxed containers on schedule
+- Used for recurring tasks needing AI reasoning
+
 ### Model Routing
 
-The system prompt instructs ghclaw to pick the right model:
+The system prompt instructs the LLM to pick the right model:
 - **Fast model**: Simple questions, status checks, quick lookups
 - **Balanced model**: Most coding tasks, analysis, planning
 - **Powerful model**: Complex reasoning, architecture decisions, multi-step work
@@ -167,58 +174,43 @@ When the daemon starts, a background loop syncs Chronicle sessions to Telegram t
 
 ```
 Every 30 seconds:
-  1. Scan ~/.copilot/session-state/ for recent sessions (last 4 hours)
+  1. Get the 5 most recent Chronicle sessions (by recency, not time window)
   2. Filter: only multi-turn interactive sessions
   3. Filter: skip ghclaw's own bot sessions
-  4. For each new session:
+  4. Check against synced_chronicle_sessions table (persists across restarts)
+  5. For each new session:
      a. Create Telegram topic: "🤖 [MacBook] Mar01 2:14pm · myapp · Fix auth bug"
      b. Store mapping in session-mapper
      c. Send welcome message with session summary
-  5. Rate limit: max 3 new topics per cycle
+  6. Rate limit: max 3 new topics per cycle
 ```
 
-## Telegram Bot Commands
+## Natural Language Interactions
 
-### Session Management
+All interactions are natural language. The LLM decides what action to take:
 
-| Command | Description |
-|---------|-------------|
-| `/sessions` | List 10 most recent Chronicle sessions |
-| `/active [hours]` | Sessions updated in last N hours |
-| `/search <query>` | Search by summary, directory, or repo |
-| `/resume <id>` | Switch to a specific session |
-| `/new` | Start a fresh session |
-| `/broadcast` | Post active sessions summary |
-| `/status` | System statistics |
-
-### Reminders & Schedules
-
-| Command | Description |
-|---------|-------------|
-| `/remind <text>` | NLP-parsed one-shot reminder ("tomorrow 9am deploy") |
-| `/reminders` | List active reminders |
-| `/cancel <id>` | Cancel a reminder |
-| `/schedule <text>` | NLP-parsed recurring schedule ("every Monday 9am standup") |
-| `/schedules` | List active schedules |
-| `/unschedule <id>` | Delete a schedule |
-
-### Agent & GitHub
-
-| Command | Description |
-|---------|-------------|
-| `/agent <desc>` | Create GitHub Issue for Copilot Coding Agent |
-| `/github` | Sync status, repo URL, reminder/schedule counts |
+| What you say | What ghclaw does |
+|-------------|-----------------|
+| "remind me tomorrow 9am to deploy v2" | Creates one-shot GitHub Actions workflow (self-deletes) |
+| "every Monday 9am check PRs" | Creates persistent cron workflow |
+| "fix the login bug in auth.ts" | Creates Copilot Coding Agent task (asks for repo first) |
+| "show my sessions" | Lists recent Chronicle sessions (pick by number to switch) |
+| "what's the sync status?" | Shows GitHub sync info |
+| "show my reminders" | Lists active reminder workflows |
+| "cancel reminder abc123" | Cancels a specific reminder |
+| "hello, how does this work?" | General chat via Copilot CLI |
 
 ## Session Selection Flow
 
 ```
-User: /sessions
+User: "show my sessions"
 Bot:  📚 Recent Sessions
       1. Fix auth bug (myapp) - 2h ago
       2. Explain repo structure - 3h ago
 
 User: 1
 Bot:  ✅ Switched to: Fix auth bug
+      Creates a Telegram topic for this session.
       Your next message will continue this session.
 
 User: What's the current status?
@@ -246,10 +238,10 @@ Message arrives at Machine A
 
 ## Streaming
 
-Responses stream via the Channel interface:
-1. First chunk → `Channel.send()` creates message with cursor (`▌`)
-2. Subsequent chunks → `Channel.edit()` updates message (300ms throttle, 20-char threshold)
-3. Done → Final `Channel.edit()` removes cursor
-4. 4096 char limit → truncated with notice
-
-The `streamToChannel()` helper works with any Channel implementation that supports editing.
+Responses stream via `streamToTelegramCollecting()`:
+1. First chunk → `client.sendMessage()` creates message with cursor (`▌`)
+2. Subsequent chunks → `client.editMessage()` updates message (300ms throttle, 20-char threshold)
+3. Action blocks (`json:ghclaw-action`) are hidden from displayed text
+4. Done → Final `client.editMessage()` removes cursor
+5. 4000 char soft limit → truncated with notice (Telegram limit is 4096)
+6. Full raw text returned for action block parsing

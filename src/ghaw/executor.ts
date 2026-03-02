@@ -6,7 +6,43 @@
  * (e.g., "every Monday review open PRs").
  *
  * Prerequisites: `gh extension install github/gh-aw`
+ *
+ * SECURITY:
+ * - All spawns use argv arrays (no shell interpolation)
+ * - Subcommands are allowlisted
+ * - Workflow names validated against strict charset
+ * - Fixed working directory
+ * - Output captured (not inherited)
  */
+
+/** Allowed gh-aw subcommands */
+const ALLOWED_SUBCOMMANDS = new Set(['init', 'new', 'compile', 'run', 'list', '--help']);
+
+/** Workflow name: lowercase alphanumeric + hyphens, no leading hyphen/dot, max 30 chars */
+const WORKFLOW_NAME_REGEX = /^[a-z0-9][a-z0-9-]{0,28}[a-z0-9]?$/;
+
+/**
+ * Validate a gh-aw subcommand
+ */
+function validateSubcommand(cmd: string): string {
+  if (!ALLOWED_SUBCOMMANDS.has(cmd)) {
+    throw new Error(`Disallowed gh-aw subcommand: ${cmd}`);
+  }
+  return cmd;
+}
+
+/**
+ * Validate a workflow name for safe use as a CLI argument and filename
+ */
+function validateWorkflowName(name: string): string {
+  if (!name || name.length > 30) {
+    throw new Error('Workflow name must be 1-30 characters');
+  }
+  if (!WORKFLOW_NAME_REGEX.test(name)) {
+    throw new Error('Workflow name must be lowercase alphanumeric with hyphens only (no leading hyphen)');
+  }
+  return name;
+}
 
 /**
  * Initialize gh-aw in a repository
@@ -19,7 +55,8 @@ export async function ghAwInit(repoPath: string): Promise<boolean> {
  * Create a new agentic workflow markdown file
  */
 export async function ghAwNew(repoPath: string, name: string): Promise<boolean> {
-  return runGhAw(repoPath, ['new', name]);
+  const safeName = validateWorkflowName(name);
+  return runGhAw(repoPath, ['new', safeName]);
 }
 
 /**
@@ -33,7 +70,8 @@ export async function ghAwCompile(repoPath: string): Promise<boolean> {
  * Run an agentic workflow
  */
 export async function ghAwRun(repoPath: string, name: string): Promise<boolean> {
-  return runGhAw(repoPath, ['run', name]);
+  const safeName = validateWorkflowName(name);
+  return runGhAw(repoPath, ['run', safeName]);
 }
 
 /**
@@ -46,12 +84,14 @@ export async function ghAwList(repoPath: string): Promise<string> {
     stderr: 'pipe',
   });
 
+  const stdoutPromise = readCapped(proc.stdout as ReadableStream<Uint8Array>, MAX_OUTPUT_SIZE);
+  const stderrPromise = readCapped(proc.stderr as ReadableStream<Uint8Array>, MAX_OUTPUT_SIZE);
+
   const exitCode = await proc.exited;
-  const stdout = await new Response(proc.stdout).text();
+  const [stdout, stderr] = await Promise.all([stdoutPromise, stderrPromise]);
 
   if (exitCode !== 0) {
-    const stderr = await new Response(proc.stderr).text();
-    throw new Error(`gh aw list failed: ${stderr.trim()}`);
+    throw new Error(`gh aw list failed: ${stderr.trim().slice(0, 200)}`);
   }
 
   return stdout.trim();
@@ -77,17 +117,69 @@ export async function isGhAwInstalled(): Promise<boolean> {
 // Internal
 // ============================================================================
 
+/** Max output to capture from gh-aw (prevents memory abuse) */
+const MAX_OUTPUT_SIZE = 10_000;
+
+/**
+ * Read a stream with a size cap. Returns at most maxBytes characters.
+ */
+async function readCapped(stream: ReadableStream<Uint8Array>, maxBytes: number): Promise<string> {
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalSize = 0;
+
+  try {
+    while (totalSize < maxBytes) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      const remaining = maxBytes - totalSize;
+      if (value.length <= remaining) {
+        chunks.push(value);
+        totalSize += value.length;
+      } else {
+        chunks.push(value.subarray(0, remaining));
+        totalSize += remaining;
+        break;
+      }
+    }
+  } finally {
+    try {
+      await reader.cancel();
+    } catch {
+      // ignore
+    }
+    try {
+      reader.releaseLock();
+    } catch {
+      // ignore
+    }
+  }
+
+  const combined = Buffer.concat(chunks);
+  return combined.toString('utf-8');
+}
+
 async function runGhAw(repoPath: string, args: string[]): Promise<boolean> {
+  // Validate the subcommand (first arg)
+  if (args.length > 0) {
+    validateSubcommand(args[0]);
+  }
+
   const proc = Bun.spawn(['gh', 'aw', ...args], {
     cwd: repoPath,
     stdout: 'pipe',
     stderr: 'pipe',
   });
 
+  const stdoutPromise = readCapped(proc.stdout as ReadableStream<Uint8Array>, MAX_OUTPUT_SIZE);
+  const stderrPromise = readCapped(proc.stderr as ReadableStream<Uint8Array>, MAX_OUTPUT_SIZE);
+
   const exitCode = await proc.exited;
+  const [, stderr] = await Promise.all([stdoutPromise, stderrPromise]);
+
   if (exitCode !== 0) {
-    const stderr = await new Response(proc.stderr).text();
-    throw new Error(`gh aw ${args[0]} failed: ${stderr.trim()}`);
+    throw new Error(`gh aw ${args[0]} failed: ${stderr.trim().slice(0, 200)}`);
   }
 
   return true;
