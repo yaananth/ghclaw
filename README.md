@@ -5,6 +5,11 @@ Local AI middle manager powered by Copilot CLI. Bridges Telegram to GitHub's ful
 ## Installation
 
 ```bash
+curl -fsSL https://raw.githubusercontent.com/yaananth/ghclaw/main/install.sh | bash
+```
+
+Or manual:
+```bash
 git clone https://github.com/yaananth/ghclaw.git
 cd ghclaw
 bun install
