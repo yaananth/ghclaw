@@ -11,7 +11,7 @@ ghclaw has a deliberate three-tier memory architecture: a thin local mapping lay
 │                                                                    │
 │  Stores ONLY:                                                      │
 │  ┌─────────────────────────────────────────────────────────────┐  │
-│  │  Telegram (chat_id, thread_id) → Copilot session UUID       │  │
+│  │  Channel (chat_id, thread_id, channel_type) → Copilot UUID │  │
 │  │  + machine_id (which machine owns this session)              │  │
 │  │  + machine_name, topic_id, status, message_count             │  │
 │  │  + synced_chronicle_sessions (persisted sync tracking)       │  │
@@ -46,7 +46,7 @@ ghclaw has a deliberate three-tier memory architecture: a thin local mapping lay
 
 ### Why Three Tiers?
 
-- **Tier 1 (SQLite)**: Fast local lookups. Maps Telegram → Copilot sessions without duplicating history. Also persists Chronicle sync tracking (survives daemon restarts).
+- **Tier 1 (SQLite)**: Fast local lookups. Maps channel messages → Copilot sessions without duplicating history. Also persists Chronicle sync tracking (survives daemon restarts).
 - **Tier 2 (Chronicle)**: Copilot CLI's built-in session management. Full conversation history, tools, checkpoints. ghclaw reads it but never writes directly.
 - **Tier 3 (GitHub)**: Cross-machine visibility. Any machine can see sessions from other machines. Also powers reminders and schedules via GitHub Actions.
 
@@ -57,16 +57,17 @@ ghclaw has a deliberate three-tier memory architecture: a thin local mapping lay
 ```sql
 CREATE TABLE sessions (
   id TEXT PRIMARY KEY,              -- Copilot session UUID
-  chat_id INTEGER NOT NULL,         -- Telegram chat ID
-  thread_id INTEGER DEFAULT 0,      -- Telegram topic/thread ID
+  chat_id INTEGER NOT NULL,         -- Channel chat/conversation ID
+  thread_id INTEGER DEFAULT 0,      -- Channel thread/topic ID
   name TEXT NOT NULL,               -- Session name
   status TEXT DEFAULT 'active',     -- 'active' or 'archived'
   created_at TEXT,                  -- ISO timestamp
   last_activity TEXT,               -- ISO timestamp
   message_count INTEGER DEFAULT 0,  -- Messages processed
-  topic_id INTEGER,                 -- Auto-created Telegram topic ID
+  topic_id INTEGER,                 -- Auto-created thread/topic ID
   machine_id TEXT,                  -- UUID of owning machine
-  machine_name TEXT                 -- Human-readable machine name
+  machine_name TEXT,                -- Human-readable machine name
+  channel_type TEXT DEFAULT 'telegram'  -- Channel type ('telegram', 'discord', etc.)
 );
 
 CREATE TABLE synced_chronicle_sessions (
@@ -133,6 +134,7 @@ Errors are logged but never crash the daemon. The sync loop is non-blocking.
 - OS keychain secrets
 - Copilot CLI internal state
 - Telegram message IDs or raw updates
+- Channel-specific raw message data
 
 ## Agent Delegation
 
@@ -168,9 +170,9 @@ The system prompt instructs the LLM to pick the right model:
 - **Balanced model**: Most coding tasks, analysis, planning
 - **Powerful model**: Complex reasoning, architecture decisions, multi-step work
 
-## Chronicle Sync (Local → Telegram)
+## Chronicle Sync (Local → Channel)
 
-When the daemon starts, a background loop syncs Chronicle sessions to Telegram topics:
+When the daemon starts, a background loop syncs Chronicle sessions to channel threads:
 
 ```
 Every 30 seconds:
@@ -179,7 +181,7 @@ Every 30 seconds:
   3. Filter: skip ghclaw's own bot sessions
   4. Check against synced_chronicle_sessions table (persists across restarts)
   5. For each new session:
-     a. Create Telegram topic: "🤖 [MacBook] Mar01 2:14pm · myapp · Fix auth bug"
+     a. Create channel thread: "🤖 [MacBook] Mar01 2:14pm · myapp · Fix auth bug"
      b. Store mapping in session-mapper
      c. Send welcome message with session summary
   6. Rate limit: max 3 new topics per cycle
@@ -238,10 +240,10 @@ Message arrives at Machine A
 
 ## Streaming
 
-Responses stream via `streamToTelegramCollecting()`:
-1. First chunk → `client.sendMessage()` creates message with cursor (`▌`)
-2. Subsequent chunks → `client.editMessage()` updates message (300ms throttle, 20-char threshold)
+Responses stream via `streamToChannelCollecting()`:
+1. First chunk → `channel.send()` creates message with cursor (`▌`)
+2. Subsequent chunks → `channel.edit()` updates message (300ms throttle, 20-char threshold)
 3. Action blocks (`json:ghclaw-action`) are hidden from displayed text
-4. Done → Final `client.editMessage()` removes cursor
-5. 4000 char soft limit → truncated with notice (Telegram limit is 4096)
+4. Done → Final `channel.edit()` removes cursor
+5. Soft message length limit based on channel's `maxMessageLength` → truncated with notice
 6. Full raw text returned for action block parsing

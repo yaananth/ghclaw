@@ -30,8 +30,9 @@ export async function createReminder(
   const id = generateId();
   const chatId = config.telegram.allowedGroupId?.toString() || '';
   const threadId = config.telegram.allowedTopicIds?.[0]?.toString();
+  const channel = config.channels.active;
 
-  const yaml = generateReminderWorkflow(id, message, cronExpression, chatId, threadId);
+  const yaml = generateReminderWorkflow(id, message, cronExpression, chatId, threadId, channel);
   const workflowPath = path.join(repoPath, '.github', 'workflows', `remind-${id}.yml`);
 
   fs.mkdirSync(path.dirname(workflowPath), { recursive: true });

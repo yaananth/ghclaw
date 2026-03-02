@@ -46,6 +46,10 @@ export interface Config {
     syncIntervalMs: number;  // 5000
     syncEnabled: boolean;    // true
   };
+  channels: {
+    active: string;          // 'telegram' (auto-detected or user-chosen)
+    configured: string[];    // ['telegram'] — populated at startup
+  };
 }
 
 let cachedConfig: Config | null = null;
@@ -83,6 +87,10 @@ interface LocalConfig {
     repoPath?: string;
     syncIntervalMs?: number;
     syncEnabled?: boolean;
+  };
+  channels?: {
+    active?: string;
+    configured?: string[];
   };
 }
 
@@ -199,6 +207,10 @@ export async function getConfigAsync(): Promise<Config> {
       syncIntervalMs: local.github?.syncIntervalMs ?? 5000,
       syncEnabled: local.github?.syncEnabled ?? true,
     },
+    channels: {
+      active: local.channels?.active ?? 'telegram',
+      configured: local.channels?.configured ?? (envToken ? ['telegram'] : []),
+    },
   };
 
   return cachedConfig;
@@ -255,6 +267,10 @@ export function getConfig(): Config {
       syncIntervalMs: local.github?.syncIntervalMs ?? 5000,
       syncEnabled: local.github?.syncEnabled ?? true,
     },
+    channels: {
+      active: local.channels?.active ?? 'telegram',
+      configured: local.channels?.configured ?? (token ? ['telegram'] : []),
+    },
   };
 }
 
@@ -275,9 +291,11 @@ export function getConfigDir(): string {
 export async function isConfigComplete(): Promise<{ complete: boolean; missing: string[] }> {
   const missing: string[] = [];
 
-  const token = await getSecret('telegram-bot-token') || process.env.TELEGRAM_BOT_TOKEN;
-  if (!token) {
-    missing.push('telegram-bot-token');
+  // Check if at least one channel is configured
+  const telegramToken = await getSecret('telegram-bot-token') || process.env.TELEGRAM_BOT_TOKEN;
+  // Future: check discord, slack tokens too
+  if (!telegramToken) {
+    missing.push('channel (no telegram-bot-token found)');
   }
 
   return {

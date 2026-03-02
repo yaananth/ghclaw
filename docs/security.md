@@ -8,7 +8,7 @@ This document details ghclaw's security architecture. ghclaw is designed for per
 
 | Threat | Mitigation |
 |--------|------------|
-| Unauthorized Telegram users invoking the bot | User allowlist + group restriction + DM blocking (fail-closed) |
+| Unauthorized channel users invoking the bot | Per-channel security (Telegram: user allowlist + group restriction + DM blocking, fail-closed). Non-Telegram: blocked until security implemented |
 | Bot token exposure | OS keychain storage, never in files or env |
 | Prompt injection via Telegram messages | Role marker stripping, session name sanitization |
 | LLM output manipulation (action block injection) | Schema validation, action type allowlist, field validation |
@@ -54,7 +54,11 @@ This document details ghclaw's security architecture. ghclaw is designed for per
 
 ### Layer 2: Access Control
 
-Six independent access control mechanisms:
+Per-channel security with fail-closed default. Each channel type implements its own access control checks. Non-Telegram channels are **rejected entirely** until they implement security.
+
+#### Telegram Security (6 mechanisms)
+
+Six independent access control mechanisms for Telegram:
 
 #### 2a. Fail-Closed Default
 
@@ -125,6 +129,10 @@ Messages in non-allowed topics are ignored.
 ```
 
 **Important:** All security checks run BEFORE any content logging. Message text is never logged for rejected messages.
+
+#### Non-Telegram Channels
+
+Non-Telegram channels (Discord, Slack, etc.) are currently **blocked by default** with a fail-closed security model. When a new channel type is added, it must implement its own security checks before any messages are processed. The daemon routes security checks based on `channelType` — if the channel type has no security implementation, the message is rejected.
 
 ### Layer 3: Action Validation (LLM Trust Boundary)
 
@@ -215,7 +223,7 @@ Error messages from Copilot CLI are sanitized before returning to Telegram:
 
 #### Session Name Sanitization
 
-Session names (from Telegram topic names or user input) are sanitized before inclusion in system prompts:
+Session names (from channel thread names or user input) are sanitized before inclusion in system prompts:
 
 ```typescript
 safeName = session.name
@@ -226,7 +234,7 @@ safeName = session.name
   .slice(0, 50);                                     // Length limit
 ```
 
-This prevents prompt injection via Telegram topic names or session names.
+This prevents prompt injection via channel thread names or session names.
 
 ### Layer 5: GitHub Integration Security
 
@@ -252,11 +260,13 @@ Setup validates scopes and prompts for re-authentication if missing.
 
 Sensitive values for GitHub Actions are stored as **repo-level secrets**, never in workflow YAML:
 
-| Secret | Purpose | Set By |
-|--------|---------|--------|
-| `TELEGRAM_BOT_TOKEN` | Send Telegram notifications from Actions | Setup wizard |
-| `TELEGRAM_CHAT_ID` | Target chat for notifications | Setup wizard |
-| `TELEGRAM_THREAD_ID` | Optional thread for forum groups | Setup wizard |
+| Secret | Purpose | Channel | Set By |
+|--------|---------|---------|--------|
+| `TELEGRAM_BOT_TOKEN` | Send Telegram notifications from Actions | Telegram | Setup wizard |
+| `TELEGRAM_CHAT_ID` | Target chat for notifications | Telegram | Setup wizard |
+| `TELEGRAM_THREAD_ID` | Optional thread for forum groups | Telegram | Setup wizard |
+
+Future channels will have their own secrets (e.g., `DISCORD_WEBHOOK_URL`, `SLACK_WEBHOOK_URL`).
 
 Secrets are set via `gh secret set` which encrypts with NaCl sealed boxes (Curve25519 + XSalsa20-Poly1305).
 
@@ -271,8 +281,9 @@ The Copilot Coding Agent API (`src/copilot/agent.ts`):
 
 #### Workflow Security
 
-Reminder and schedule workflows:
+Reminder and schedule workflows are channel-aware:
 - Use `secrets.*` references, never hardcoded values
+- Channel-specific send steps (Telegram uses curl to Bot API, future channels use their own APIs)
 - Self-deleting reminders use `GITHUB_TOKEN` (automatic, scoped to repo)
 - No `pull_request_target` or other dangerous triggers
 - No external action dependencies (uses only `run:` steps with `curl`)

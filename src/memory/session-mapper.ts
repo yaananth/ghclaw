@@ -1,14 +1,14 @@
 /**
  * Session Mapper
  *
- * Minimal database that maps Telegram chats to Copilot CLI sessions.
+ * Minimal database that maps channel chats to Copilot CLI sessions.
  * ALL actual memory, context, and history is handled by Copilot CLI's
  * Chronicle feature (~/.copilot/session-store.db).
  *
  * We only store:
- * - Telegram chat_id + thread_id -> Copilot session_id
- * - Basic session metadata (name, status)
- * - Topic IDs for forum groups
+ * - Channel chat_id + thread_id -> Copilot session_id
+ * - Basic session metadata (name, status, channel_type)
+ * - Topic IDs for threaded channels
  */
 
 import { Database } from 'bun:sqlite';
@@ -21,18 +21,22 @@ import * as crypto from 'crypto';
 // Types
 // ============================================================================
 
-export interface TelegramSession {
+/** @deprecated Use ChannelSession instead. Kept as alias for backward compat. */
+export type TelegramSession = ChannelSession;
+
+export interface ChannelSession {
   id: string;                      // Copilot session ID (UUID)
-  chat_id: number;                 // Telegram chat ID
-  thread_id: number;               // Telegram thread/topic ID (0 for main chat)
+  chat_id: number;                 // Channel chat/conversation ID
+  thread_id: number;               // Channel thread/topic ID (0 for main chat)
   name: string;                    // Session name (from topic or generated)
   status: 'active' | 'archived';
   created_at: string;
   last_activity: string;
   message_count: number;
-  topic_id?: number;               // Telegram topic ID if auto-created
+  topic_id?: number;               // Auto-created topic ID
   machine_id?: string;             // Machine that owns this session
   machine_name?: string;           // Human-readable machine name
+  channel_type?: string;           // 'telegram' | 'discord' | 'slack' | ...
 }
 
 // ============================================================================
@@ -109,6 +113,13 @@ export function initDatabase(): Database {
   }
   try {
     db.exec('ALTER TABLE sessions ADD COLUMN machine_name TEXT');
+  } catch {
+    // Column already exists
+  }
+
+  // Migration: add channel_type column if missing (defaults to 'telegram' for existing rows)
+  try {
+    db.exec("ALTER TABLE sessions ADD COLUMN channel_type TEXT DEFAULT 'telegram'");
   } catch {
     // Column already exists
   }

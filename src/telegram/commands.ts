@@ -287,7 +287,7 @@ async function handleStatus(ctx: CommandContext): Promise<CommandResult> {
   if (chronicleStats) {
     response += `*Copilot Chronicle:*\n`;
     response += `• Sessions: ${chronicleStats.totalSessions}\n`;
-    response += `• Total turns: ${chronicleStats.totalTurns}\n`;
+    response += `• Turns (last 5): ${chronicleStats.totalTurns}\n`;
     if (chronicleStats.newestSession) {
       response += `• Latest: ${formatTimeAgo(chronicleStats.newestSession)}\n`;
     }
@@ -455,7 +455,7 @@ async function handleSchedule(ctx: CommandContext): Promise<CommandResult> {
       config.github.repoPath,
       parsed.humanReadable,
       parsed.cronExpression,
-      { type: 'telegram_message', message: parsed.message },
+      { type: 'channel_message', channel: config.channels.active, message: parsed.message },
       config
     );
 

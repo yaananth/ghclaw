@@ -399,14 +399,15 @@ export function getChronicleStats(): {
     const entries = fs.readdirSync(stateDir, { withFileTypes: true });
     const totalSessions = entries.filter(e => e.isDirectory()).length;
 
-    // Get a few recent for stats
+    // Get recent non-(-p) sessions for stats — aggregate their turn counts
     const recent = getRecentSessions(5);
+    const sampledTurns = recent.reduce((sum, s) => sum + (s.turn_count || 0), 0);
     const oldest = recent.length > 0 ? recent[recent.length - 1].created_at : null;
     const newest = recent.length > 0 ? recent[0].updated_at : null;
 
     return {
       totalSessions,
-      totalTurns: 0, // Not easily countable from filesystem
+      totalTurns: sampledTurns,
       oldestSession: oldest,
       newestSession: newest,
     };

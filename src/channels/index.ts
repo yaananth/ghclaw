@@ -21,3 +21,11 @@ export {
 } from './channel';
 
 export { TelegramChannel } from './telegram';
+
+export {
+  type ChannelConfig,
+  detectConfiguredChannels,
+  getActiveChannel,
+  getActiveChannelType,
+  clearChannelCache,
+} from './registry';

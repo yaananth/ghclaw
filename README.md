@@ -1,6 +1,6 @@
 # ghclaw
 
-Local AI middle manager powered by Copilot CLI. Bridges Telegram to GitHub's full agent ecosystem — delegates coding tasks, manages schedules, syncs memory across machines, all without exposing your machine to the internet.
+Local AI middle manager powered by Copilot CLI. Bridges messaging channels (Telegram, with Discord/Slack planned) to GitHub's full agent ecosystem — delegates coding tasks, manages schedules, syncs memory across machines, all without exposing your machine to the internet.
 
 ## Installation
 
@@ -31,12 +31,13 @@ ghclaw start
 ```
 
 Setup flow:
-1. Enter Telegram bot token (from @BotFather)
-2. Auto-detect group and user from a message
-3. GitHub CLI auto-login (if not authenticated)
-4. Auto-create private sync repo (asks for org, defaults to your username)
-5. Auto-set repo secrets and initialize structure
-6. Done — start the bot
+1. Detect configured channels (auto-select if only one)
+2. Enter channel token (e.g., Telegram bot token from @BotFather)
+3. Auto-detect group and user from a message (Telegram)
+4. GitHub CLI auto-login (if not authenticated)
+5. Auto-create private sync repo (asks for org, defaults to your username)
+6. Auto-set repo secrets and initialize structure
+7. Done — start the bot
 
 ## What It Does
 
@@ -52,7 +53,7 @@ ghclaw acts as a **middle manager** between you and GitHub Copilot CLI's capabil
 ## Architecture
 
 ```
-You (Telegram)                ghclaw (local)                    GitHub
+You (Channel)                 ghclaw (local)                    GitHub
 ┌──────────┐    poll     ┌─────────────────────┐    sync     ┌──────────────────┐
 │ Message   │──────────► │ Security → Router    │──────────► │ {user}/.ghclaw   │
 │ /remind   │            │     ↓                │            │ ├── memory/       │
@@ -68,6 +69,7 @@ You (Telegram)                ghclaw (local)                    GitHub
 ## Features
 
 ### Core
+- **Channel abstraction**: Pluggable channel interface (Telegram today, Discord/Slack planned)
 - **Telegram interface**: Forum topics, streaming responses, slash commands
 - **Local-only**: All connections outbound (polling), no exposed ports
 - **Copilot CLI powered**: Full access to `/delegate`, `/fleet`, tools, and models
@@ -99,7 +101,7 @@ You (Telegram)                ghclaw (local)                    GitHub
 
 | Command | Description |
 |---------|-------------|
-| `ghclaw setup` | Interactive setup (keychain + GitHub auto-config) |
+| `ghclaw setup` | Interactive setup (auto-detects channels, keychain + GitHub auto-config) |
 | `ghclaw doctor` | Check dependencies, auth, security, GitHub |
 | `ghclaw config` | Show configuration and paths |
 | `ghclaw status` | Machine identity, sessions, connections |
@@ -224,13 +226,16 @@ Local Machine                          GitHub
 
 ## Security
 
-Five layers of protection:
+Per-channel security with fail-closed default:
 
+**Telegram** (6 layers):
 1. **Group-only mode**: Restrict to specific groups
 2. **User allowlist**: Only specific user IDs
 3. **Block DMs**: No private messages
 4. **Secret prefix**: Require phrase in messages
 5. **Topic restriction**: Limit to specific forum topics
+
+**Non-Telegram channels**: Blocked until channel-specific security is implemented (fail-closed).
 
 Secrets in OS keychain. GitHub repo secrets for Actions workflows. All connections outbound.
 
@@ -240,6 +245,10 @@ Secrets in OS keychain. GitHub repo secrets for Actions workflows. All connectio
 
 ```json
 {
+  "channels": {
+    "active": "telegram",
+    "configured": ["telegram"]
+  },
   "telegram": {
     "blockPrivateMessages": true,
     "pollIntervalMs": 1000,

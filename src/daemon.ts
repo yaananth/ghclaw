@@ -1,12 +1,16 @@
 /**
  * GHClaw Main Daemon
  *
- * Polls Telegram and processes messages with Copilot CLI.
+ * Polls a messaging channel and processes messages with Copilot CLI.
  * Uses Copilot CLI's built-in session management (Chronicle) for all memory.
- * We only maintain a minimal mapping: Telegram chat/topic -> Copilot session ID.
+ * We only maintain a minimal mapping: channel chat/thread -> Copilot session ID.
+ *
+ * Channel-agnostic: uses the Channel interface from src/channels/.
+ * Telegram is the first implementation; future channels plug in via the registry.
  */
 
-import { TelegramClient, streamToTelegram, type TelegramMessage } from './telegram/client';
+import type { Channel, ChannelMessage, SendOptions } from './channels/channel';
+import { getActiveChannel, type ChannelConfig } from './channels/registry';
 import { checkMessageSecurity, loadSecurityConfig, type SecurityConfig } from './telegram/security';
 import { executePrompt, type SessionOptions } from './copilot/session';
 import { discoverCopilotFeatures, formatDiscovery, type CopilotDiscovery } from './copilot/discovery';
@@ -42,12 +46,12 @@ let discovery: CopilotDiscovery | null = null;
 
 /**
  * Generate a short topic title from a message using Copilot CLI
- * Returns a 3-6 word summary suitable for a Telegram topic name
+ * Returns a 3-6 word summary suitable for a thread/topic name
  */
 async function generateTopicTitle(message: string, cliPath: string = 'copilot'): Promise<string> {
   const cwd = process.cwd();
   const dirName = require('path').basename(cwd);
-  const titlePrompt = `Generate a very short title (3-6 words max) for a Telegram chat topic about this message. The project directory is "${dirName}". Reply with ONLY the title, nothing else. No quotes, no punctuation at the end.\n\nMessage: ${message.slice(0, 200)}`;
+  const titlePrompt = `Generate a very short title (3-6 words max) for a chat topic about this message. The project directory is "${dirName}". Reply with ONLY the title, nothing else. No quotes, no punctuation at the end.\n\nMessage: ${message.slice(0, 200)}`;
 
   const proc = Bun.spawn([cliPath, '-p', titlePrompt, '--silent'], {
     stdout: 'pipe',
@@ -66,7 +70,7 @@ async function generateTopicTitle(message: string, cliPath: string = 'copilot'):
 }
 
 /**
- * Escape special characters for Telegram Markdown
+ * Escape special characters for Markdown
  */
 function escapeMarkdown(text: string): string {
   return text.replace(/[_*[\]`]/g, '\\$&');
@@ -76,7 +80,7 @@ function escapeMarkdown(text: string): string {
 // Key: "chatId:threadId", Value: Copilot session ID or "__new__" for fresh session
 const sessionOverrides = new Map<string, string>();
 
-function getChatKey(chatId: number, threadId: number): string {
+function getChatKey(chatId: string, threadId: string): string {
   return `${chatId}:${threadId}`;
 }
 
@@ -84,12 +88,25 @@ async function main() {
   console.log('🤖 GHClaw Starting...\n');
 
   const config = await getConfigAsync();
-  const client = new TelegramClient(config.telegram.botToken);
-  const security = await loadSecurityConfig();
 
-  // Verify bot connection
-  const me = await client.getMe();
-  console.log(`✅ Connected as @${me.username} (${me.first_name})`);
+  // Get the active channel via registry (auto-detects configured channels)
+  let channelConfig: ChannelConfig;
+  try {
+    channelConfig = await getActiveChannel(config.channels.active);
+  } catch (err) {
+    console.error(`❌ ${err}`);
+    process.exit(1);
+  }
+  const channel = channelConfig.channel;
+  console.log(`📡 Channel: ${channelConfig.type}`);
+
+  // Start and verify channel connection
+  await channel.start();
+  const channelInfo = await channel.getInfo();
+  console.log(`✅ Connected as @${channelInfo.botUsername || channelInfo.botName} (${channelInfo.botName})`);
+
+  // Load security config (currently Telegram-specific, but checks are skipped for other channels)
+  const security = await loadSecurityConfig();
 
   // Discover copilot features
   console.log('\n🔍 Discovering Copilot CLI features...');
@@ -101,11 +118,13 @@ async function main() {
   }
 
   // Print config
-  console.log('\n🔒 Security Configuration:');
-  console.log(`   Block DMs: ${security.blockPrivateMessages}`);
-  console.log(`   Allowed Group: ${security.allowedGroupId || 'Any'}`);
-  console.log(`   Allowed Users: ${security.allowedUserIds?.join(', ') || 'Any'}`);
-  console.log(`   Secret Prefix: ${security.secretPrefix ? 'Enabled' : 'Disabled'}`);
+  if (channelConfig.type === 'telegram') {
+    console.log('\n🔒 Security Configuration:');
+    console.log(`   Block DMs: ${security.blockPrivateMessages}`);
+    console.log(`   Allowed Group: ${security.allowedGroupId || 'Any'}`);
+    console.log(`   Allowed Users: ${security.allowedUserIds?.join(', ') || 'Any'}`);
+    console.log(`   Secret Prefix: ${security.secretPrefix ? 'Enabled' : 'Disabled'}`);
+  }
 
   console.log('\n⚡ Copilot Configuration:');
   console.log(`   Model: ${config.copilot.defaultModel || 'default'}`);
@@ -119,14 +138,14 @@ async function main() {
   try {
     const stats = getSessionStats();
     console.log('\n🧠 Sessions:');
-    console.log(`   Telegram mappings: ${stats.activeSessions} active`);
+    console.log(`   Channel mappings: ${stats.activeSessions} active`);
     console.log(`   Total messages: ${stats.totalMessages}`);
 
     // Chronicle stats
     if (isChronicleAvailable()) {
       const chronicleStats = getChronicleStats();
       console.log(`   Chronicle sessions: ${chronicleStats.totalSessions}`);
-      console.log(`   Chronicle turns: ${chronicleStats.totalTurns}`);
+      console.log(`   Chronicle turns (last 5): ${chronicleStats.totalTurns}`);
     } else {
       console.log('   Chronicle: Not found (run copilot once to initialize)');
     }
@@ -177,6 +196,7 @@ async function main() {
   const shutdown = async () => {
     console.log('\n\n🛑 Shutting down gracefully...');
     isRunning = false;
+    await channel.stop();
     // Remove lock file
     try {
       fs.unlinkSync(lockFile);
@@ -186,20 +206,24 @@ async function main() {
   process.on('SIGINT', shutdown);
   process.on('SIGTERM', shutdown);
 
-  // Start Chronicle sync in background (if we have an allowed group ID)
-  // Note: Only works if the group has Topics/Forum mode enabled
-  if (security.allowedGroupId) {
+  // Start Chronicle sync in background (if we have an allowed group ID and channel supports threads)
+  if (security.allowedGroupId && channel.createThread) {
+    const chatId = security.allowedGroupId.toString();
     // Check if group is a forum before starting sync
-    checkForumStatus(client, security.allowedGroupId).then(isForum => {
-      if (isForum) {
-        startChronicleSync(client, security.allowedGroupId!, config).catch(err => {
-          console.log(`⚠️ Chronicle sync stopped: ${err}`);
-        });
-      } else {
-        console.log(`ℹ️ Chronicle sync disabled: Group doesn't have Topics enabled`);
-        console.log(`   To enable: Group Settings → Topics → Enable`);
-      }
-    });
+    if (channel.getChatInfo) {
+      channel.getChatInfo(chatId).then(info => {
+        if (info.isForum) {
+          startChronicleSync(channel, chatId, config).catch(err => {
+            console.log(`⚠️ Chronicle sync stopped: ${err}`);
+          });
+        } else {
+          console.log(`ℹ️ Chronicle sync disabled: Group doesn't have Topics enabled`);
+          console.log(`   To enable: Group Settings → Topics → Enable`);
+        }
+      }).catch(() => {
+        console.log(`ℹ️ Chronicle sync disabled: Could not check group status`);
+      });
+    }
   }
 
   // Start GitHub sync loop in background
@@ -210,22 +234,22 @@ async function main() {
   }
 
   // Register minimal bot commands (natural language handles the rest)
-  await client.setMyCommands([
-    { command: 'start', description: 'Welcome message' },
-    { command: 'help', description: 'How to use ghclaw' },
-    { command: 'new', description: 'Start a fresh session' },
-  ]);
-  console.log('📋 Bot commands registered (natural language handles the rest)');
+  if (channel.setCommands) {
+    await channel.setCommands([
+      { command: 'start', description: 'Welcome message' },
+      { command: 'help', description: 'How to use ghclaw' },
+      { command: 'new', description: 'Start a fresh session' },
+    ]);
+    console.log('📋 Bot commands registered (natural language handles the rest)');
+  }
 
   // Main polling loop
   while (isRunning) {
     try {
-      const updates = await client.getUpdates(config.telegram.pollTimeoutSeconds);
+      const messages = await channel.poll(config.telegram.pollTimeoutSeconds);
 
-      for (const update of updates) {
-        if (update.message) {
-          await processMessage(client, update.message, security, config);
-        }
+      for (const message of messages) {
+        await processMessage(channel, channelConfig.type, message, security, config);
       }
     } catch (error) {
       console.error('❌ Polling error:', error);
@@ -237,38 +261,66 @@ async function main() {
 }
 
 async function processMessage(
-  client: TelegramClient,
-  message: TelegramMessage,
+  channel: Channel,
+  channelType: string,
+  message: ChannelMessage,
   security: SecurityConfig,
   config: Config
 ): Promise<void> {
-  const chatId = message.chat.id;
-  let threadId = message.message_thread_id || 0;
-  const user = message.from;
+  const chatId = message.chatId;
+  let threadId = message.threadId || '0';
+  const user = message.sender;
   const text = message.text;
-  const isForum = message.chat.is_forum || false;
+  const isForum = message.isThreaded;
 
-  if (!text || !user) return;
+  if (!text || user.isBot) return;
 
   // Security check FIRST - before any logging
-  const securityResult = checkMessageSecurity(message, security);
-  if (!securityResult.allowed) {
-    console.log(`🚫 Blocked: ${user.id} - ${securityResult.reason}`);
-    return;
+  // Each channel type runs its own security checks.
+  if (channelType === 'telegram') {
+    // Telegram: full security check using raw TelegramMessage
+    const securityResult = checkMessageSecurity(message.raw as any, security);
+    if (!securityResult.allowed) {
+      console.log(`🚫 Blocked: ${user.id} - ${securityResult.reason}`);
+      return;
+    }
+    const sanitized = securityResult.sanitizedText ?? text;
+    if (!sanitized.trim()) return;
+    return processMessageInner(channel, message, sanitized, security, config, chatId, threadId, isForum);
   }
 
-  const prompt = securityResult.sanitizedText ?? text;
-  if (!prompt.trim()) return;
+  // Non-Telegram channels: fail-closed until channel-specific security is implemented.
+  // Every channel MUST implement its own security check before messages are processed.
+  // For now, reject messages from channels that don't have security checks implemented.
+  console.log(`🚫 Blocked: Channel type '${channelType}' does not have security checks implemented yet`);
+  return;
+}
 
-  // Acknowledge receipt immediately with 👀 reaction
-  client.setReaction(chatId, message.message_id, '👀');
+async function processMessageInner(
+  channel: Channel,
+  message: ChannelMessage,
+  prompt: string,
+  security: SecurityConfig,
+  config: Config,
+  chatId: string,
+  threadId: string,
+  isForum: boolean
+): Promise<void> {
+  const user = message.sender;
+  const chatIdNum = parseInt(chatId) || 0;
+  const threadIdNum = parseInt(threadId) || 0;
+
+  // Acknowledge receipt immediately with 👀 reaction (if supported)
+  if (channel.setReaction) {
+    channel.setReaction(chatId, message.id, '👀');
+  }
 
   // Check if it's a command
   if (prompt.startsWith('/')) {
     const cmdResult = await handleCommand(prompt, {
-      chatId,
-      threadId,
-      userId: user.id,
+      chatId: chatIdNum,
+      threadId: threadIdNum,
+      userId: parseInt(user.id) || 0,
       username: user.username,
       args: '',
     });
@@ -281,31 +333,31 @@ async function processMessage(
         console.log(`🔄 [${chatId}:${threadId}] Session override: ${cmdResult.switchToSession.slice(0, 8)}`);
       }
 
-      await client.sendMessage(chatId, cmdResult.response, {
-        message_thread_id: threadId || undefined,
-        parse_mode: cmdResult.parseMode,
+      await channel.send(chatId, cmdResult.response, {
+        threadId: threadId !== '0' ? threadId : undefined,
+        format: cmdResult.parseMode === 'Markdown' ? 'markdown' : cmdResult.parseMode === 'HTML' ? 'html' : 'plain',
       });
       return;
     }
   }
 
   // Check if it's a session selection (plain number after /sessions)
-  const selectedSession = checkSessionSelection(prompt, chatId, threadId);
+  const selectedSession = checkSessionSelection(prompt, chatIdNum, threadIdNum);
   if (selectedSession) {
     console.log(`🔄 Selected Chronicle session: ${selectedSession.id.slice(0, 8)}`);
 
     // If it's a forum, create a topic for this session
-    if (isForum && threadId === 0) {
+    if (isForum && threadId === '0' && channel.createThread) {
       try {
         const summary = selectedSession.summary?.slice(0, 50).replace(/[\n\r\t]+/g, ' ').trim() || `Session ${selectedSession.id.slice(0, 8)}`;
-        const topic = await client.createForumTopic(chatId, `🤖 [${config.machine.name}] ${summary}`);
-        const newThreadId = topic.message_thread_id;
+        const thread = await channel.createThread(chatId, `🤖 [${config.machine.name}] ${summary}`);
+        const newThreadId = thread.threadId;
         // Create the mapping row AND set the override for the new topic
-        createSessionWithTopic(chatId, newThreadId, selectedSession.id, summary, config.machine.id, config.machine.name);
+        createSessionWithTopic(chatIdNum, parseInt(newThreadId), selectedSession.id, summary, config.machine.id, config.machine.name);
         const newKey = getChatKey(chatId, newThreadId);
         sessionOverrides.set(newKey, selectedSession.id);
         // Clean up the old override (General chat)
-        sessionOverrides.delete(getChatKey(chatId, 0));
+        sessionOverrides.delete(getChatKey(chatId, '0'));
         threadId = newThreadId;
         console.log(`📌 Created topic ${threadId} for session ${selectedSession.id.slice(0, 8)}`);
       } catch (err) {
@@ -319,18 +371,19 @@ async function processMessage(
       sessionOverrides.set(key, selectedSession.id);
     }
 
-    await client.sendMessage(chatId, `✅ Switched to: *${escapeMarkdown(selectedSession.summary?.slice(0, 50) || 'Unnamed')}*\n\nYour next message will continue this session.`, {
-      message_thread_id: threadId || undefined,
-      parse_mode: 'Markdown',
+    await channel.send(chatId, `✅ Switched to: *${escapeMarkdown(selectedSession.summary?.slice(0, 50) || 'Unnamed')}*\n\nYour next message will continue this session.`, {
+      threadId: threadId !== '0' ? threadId : undefined,
+      format: 'markdown',
     });
     return;
   }
 
-  // Get topic name if available (check both the message itself and reply_to_message)
+  // Get topic name if available (Telegram-specific, from raw message)
   let topicName: string | undefined;
-  if (isForum) {
-    topicName = message.forum_topic_created?.name
-      || message.reply_to_message?.forum_topic_created?.name;
+  if (isForum && message.raw) {
+    const raw = message.raw as any;
+    topicName = raw.forum_topic_created?.name
+      || raw.reply_to_message?.forum_topic_created?.name;
   }
 
   // Determine which session to use
@@ -351,8 +404,8 @@ async function processMessage(
     sessionId = override;
     sessionName = `Chronicle:${override.slice(0, 8)}`;
   } else {
-    // Default: use Telegram chat/thread mapping
-    const session = getOrCreateSession(chatId, threadId, topicName, config.machine.id, config.machine.name);
+    // Default: use channel chat/thread mapping
+    const session = getOrCreateSession(chatIdNum, threadIdNum, topicName, config.machine.id, config.machine.name);
     sessionId = session.id;
     sessionName = session.name;
 
@@ -360,9 +413,9 @@ async function processMessage(
     if (session.machine_id && session.machine_id !== config.machine.id) {
       const ownerName = escapeMarkdown(session.machine_name || 'another machine');
       console.log(`🔀 [${sessionName}] Redirecting: owned by ${ownerName} (${session.machine_id.slice(0, 8)})`);
-      await client.sendMessage(chatId, `💻 This session lives on *${ownerName}*.\nResume there: \`copilot --resume ${session.id}\``, {
-        message_thread_id: threadId || undefined,
-        parse_mode: 'Markdown',
+      await channel.send(chatId, `💻 This session lives on *${ownerName}*.\nResume there: \`copilot --resume ${session.id}\``, {
+        threadId: threadId !== '0' ? threadId : undefined,
+        format: 'markdown',
       });
       return;
     }
@@ -370,20 +423,20 @@ async function processMessage(
 
   // Auto-create topic for forum groups if message is in main chat (General)
   let targetThreadId = threadId;
-  if (isForum && threadId === 0 && !override) {
+  if (isForum && threadId === '0' && !override && channel.createThread) {
     try {
       // Create topic with placeholder name (instant, don't block on AI)
       const machineTag = config.machine.name;
       const placeholder = `🤖 [${machineTag}] ${prompt.slice(0, 30).trim().replace(/[\n\r\t]+/g, ' ') || 'New chat'}`;
-      const topic = await client.createForumTopic(chatId, placeholder);
-      targetThreadId = topic.message_thread_id;
+      const thread = await channel.createThread(chatId, placeholder);
+      targetThreadId = thread.threadId;
       createdTopic = true;
 
       // Update the session mapping to use this topic
-      const session = getOrCreateSession(chatId, targetThreadId, placeholder, config.machine.id, config.machine.name);
+      const session = getOrCreateSession(chatIdNum, parseInt(targetThreadId), placeholder, config.machine.id, config.machine.name);
       sessionId = session.id;
       sessionName = session.name;
-      setSessionTopicId(session.id, targetThreadId);
+      setSessionTopicId(session.id, parseInt(targetThreadId));
 
       console.log(`📌 Auto-created topic ${targetThreadId}`);
 
@@ -392,7 +445,9 @@ async function processMessage(
       const sessionIdForRename = session.id;
       generateTopicTitle(prompt, config.copilot.cliPath).then(async (title) => {
         try {
-          await client.editForumTopic(chatId, topicThreadId, `🤖 [${machineTag}] ${title}`);
+          if (channel.renameThread) {
+            await channel.renameThread(chatId, topicThreadId, `🤖 [${machineTag}] ${title}`);
+          }
           renameSession(sessionIdForRename, title);
           console.log(`📝 Topic ${topicThreadId} renamed to: ${title}`);
         } catch (err) {
@@ -403,9 +458,7 @@ async function processMessage(
       });
 
       // Notify in the original location
-      await client.sendMessage(chatId, `📌 Created topic for this conversation. Continuing there...`, {
-        message_thread_id: undefined,
-      });
+      await channel.send(chatId, `📌 Created topic for this conversation. Continuing there...`, {});
     } catch (err) {
       console.log(`⚠️ Could not auto-create topic: ${err}`);
       // Continue in main chat if topic creation fails
@@ -436,10 +489,11 @@ async function processMessage(
 
     const generator = executePrompt(fullPrompt, sessionOptions);
 
-    // Collect full response while streaming to Telegram
-    const collectedText = await streamToTelegramCollecting(client, chatId, generator, {
-      message_thread_id: targetThreadId || undefined,
-    });
+    // Collect full response while streaming to channel
+    const sendOpts: SendOptions = {
+      threadId: targetThreadId !== '0' ? targetThreadId : undefined,
+    };
+    const collectedText = await streamToChannelCollecting(channel, chatId, generator, sendOpts);
 
     // Parse action blocks from the response
     const parsed = parseActionBlocks(collectedText);
@@ -449,9 +503,9 @@ async function processMessage(
       console.log(`⚡ [${sessionName}] Executing action: ${action.action}`);
       try {
         const result = await executeAction(action, {
-          chatId,
-          threadId: targetThreadId,
-          userId: user.id,
+          chatId: chatIdNum,
+          threadId: parseInt(targetThreadId) || 0,
+          userId: parseInt(user.id) || 0,
           username: user.username,
         });
 
@@ -464,39 +518,41 @@ async function processMessage(
 
         // Store pending sessions for number-based selection
         if (result.pendingSessions) {
-          setPendingSessions(chatId, targetThreadId, result.pendingSessions);
+          setPendingSessions(chatIdNum, parseInt(targetThreadId) || 0, result.pendingSessions);
         }
 
         // Send action result as follow-up message
         if (result.response) {
-          await client.sendMessage(chatId, result.response, {
-            message_thread_id: targetThreadId || undefined,
-            parse_mode: result.parseMode,
+          await channel.send(chatId, result.response, {
+            threadId: targetThreadId !== '0' ? targetThreadId : undefined,
+            format: result.parseMode === 'Markdown' ? 'markdown' : result.parseMode === 'HTML' ? 'html' : 'plain',
           });
         }
       } catch (actionErr: any) {
         console.error(`❌ [${sessionName}] Action ${action.action} failed:`, actionErr);
-        await client.sendMessage(chatId, `⚠️ Action failed: ${actionErr.message || 'Unknown error'}`, {
-          message_thread_id: targetThreadId || undefined,
+        await channel.send(chatId, `⚠️ Action failed: ${actionErr.message || 'Unknown error'}`, {
+          threadId: targetThreadId !== '0' ? targetThreadId : undefined,
         });
       }
     }
 
     // Update activity for the mapped session (only for default mapping, not overrides)
     if (!override) {
-      const session = getOrCreateSession(chatId, targetThreadId, topicName, config.machine.id, config.machine.name);
+      const session = getOrCreateSession(chatIdNum, parseInt(targetThreadId) || 0, topicName, config.machine.id, config.machine.name);
       updateSessionActivity(session.id);
     }
 
     console.log(`✅ [${sessionName}] Response sent${createdTopic ? ' (in new topic)' : ''}${parsed.actions.length > 0 ? ` + ${parsed.actions.length} action(s)` : ''}`);
 
-    // Clear the 👀 reaction now that we've responded
-    client.setReaction(chatId, message.message_id, '');
+    // Clear the 👀 reaction now that we've responded (if supported)
+    if (channel.setReaction) {
+      channel.setReaction(chatId, message.id, '');
+    }
 
   } catch (error) {
     console.error(`❌ [${sessionName}] Error:`, error);
-    await client.sendMessage(chatId, 'Sorry, an error occurred processing your request.', {
-      message_thread_id: targetThreadId || undefined,
+    await channel.send(chatId, 'Sorry, an error occurred processing your request.', {
+      threadId: targetThreadId !== '0' ? targetThreadId : undefined,
     });
   }
 }
@@ -558,21 +614,25 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Stream response to Telegram while collecting the full text for action parsing.
- * Same streaming behavior as streamToTelegram but:
+ * Stream response to channel while collecting the full text for action parsing.
  * - Strips action blocks from the displayed text
  * - Returns the full raw text for action block parsing
+ * - Works with any Channel implementation
  */
-async function streamToTelegramCollecting(
-  client: TelegramClient,
-  chatId: number,
+async function streamToChannelCollecting(
+  channel: Channel,
+  chatId: string,
   generator: AsyncGenerator<{ type: string; content: string }>,
-  options: { message_thread_id?: number; parse_mode?: string } = {}
+  options: SendOptions = {}
 ): Promise<string> {
   const ACTION_BLOCK_START = '```json:ghclaw-action';
   const ACTION_BLOCK_END = '```';
 
-  let messageId: number | null = null;
+  const info = await channel.getInfo();
+  const maxMessageLength = Math.max(info.maxMessageLength - 100, 500);
+  const canEdit = info.supportsEditing;
+
+  let messageId: string | null = null;
   let fullText = '';      // Raw text (includes action blocks)
   let displayText = '';   // Text shown to user (action blocks stripped)
   let lastUpdate = 0;
@@ -580,10 +640,13 @@ async function streamToTelegramCollecting(
   let inActionBlock = false;
   const minUpdateInterval = 300;
   const charThreshold = 20;
-  const maxMessageLength = 4000;
   let truncated = false;
 
-  await client.sendTyping(chatId, options.message_thread_id);
+  try {
+    await channel.sendTyping(chatId, options.threadId);
+  } catch {
+    // Typing indicator is best-effort
+  }
 
   for await (const chunk of generator) {
     chunkCount++;
@@ -611,20 +674,18 @@ async function streamToTelegramCollecting(
 
         const now = Date.now();
         const timeSinceLastUpdate = now - lastUpdate;
-        const shouldUpdate = timeSinceLastUpdate >= minUpdateInterval &&
+        const shouldUpdate = canEdit &&
+          timeSinceLastUpdate >= minUpdateInterval &&
           (!messageId || newChars >= charThreshold || displayText.length < 100);
 
         if (shouldUpdate) {
           try {
             const showText = displayText + ' ▌';
             if (!messageId) {
-              const msg = await client.sendMessage(chatId, showText, options as any);
-              messageId = msg.message_id;
+              const sent = await channel.send(chatId, showText, options);
+              messageId = sent.id;
             } else {
-              await client.editMessage(chatId, messageId, showText, {
-                parse_mode: (options as any).parse_mode,
-                message_thread_id: options.message_thread_id,
-              });
+              await channel.edit(chatId, messageId, showText, options);
             }
             lastUpdate = now;
           } catch {
@@ -640,23 +701,20 @@ async function streamToTelegramCollecting(
       }
 
       try {
-        if (messageId) {
-          await client.editMessage(chatId, messageId, finalDisplay, {
-            parse_mode: (options as any).parse_mode,
-            message_thread_id: options.message_thread_id,
-          });
+        if (messageId && canEdit) {
+          await channel.edit(chatId, messageId, finalDisplay, options);
         } else {
-          await client.sendMessage(chatId, finalDisplay, options as any);
+          await channel.send(chatId, finalDisplay, options);
         }
       } catch {
-        await client.sendMessage(chatId, finalDisplay, options as any);
+        await channel.send(chatId, finalDisplay, options);
       }
       break;
     }
   }
 
   if (chunkCount === 0) {
-    await client.sendMessage(chatId, 'No response received.', options as any);
+    await channel.send(chatId, 'No response received.', options);
   }
 
   return fullText;
@@ -683,29 +741,20 @@ function formatShortTimestamp(dateStr: string): string {
 // ============================================================================
 
 /**
- * Check if a group has Topics/Forum mode enabled
- */
-async function checkForumStatus(client: TelegramClient, chatId: number): Promise<boolean> {
-  try {
-    const chat = await client.getChat(chatId);
-    return chat.is_forum === true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Sync Chronicle sessions to Telegram topics
+ * Sync Chronicle sessions to channel topics/threads
  * Uses getRecentSessions (top 5 by recency) instead of time-based active sessions.
  * Synced session IDs are persisted in SQLite to survive daemon restarts.
  * Max 3 topics auto-created per sync cycle.
  */
 async function syncChronicleToTopics(
-  client: TelegramClient,
-  chatId: number,
+  channel: Channel,
+  chatId: string,
   config: Config
 ): Promise<void> {
   if (!isChronicleAvailable()) return;
+  if (!channel.createThread) return;
+
+  const chatIdNum = parseInt(chatId) || 0;
 
   try {
     // Get the 5 most recent Chronicle sessions (regardless of age)
@@ -713,8 +762,8 @@ async function syncChronicleToTopics(
 
     if (chronicleSessions.length === 0) return;
 
-    // Get existing Telegram sessions with topics
-    const existingTopics = getSessionsWithTopics(chatId);
+    // Get existing sessions with topics
+    const existingTopics = getSessionsWithTopics(chatIdNum);
     const existingIds = new Set(existingTopics.map(s => s.id));
 
     // Get persisted synced IDs from SQLite (survives daemon restarts)
@@ -741,9 +790,9 @@ async function syncChronicleToTopics(
         const topicParts = [ts, dir, summary].filter(Boolean);
         const topicName = topicParts.join(' · ').slice(0, 50);
 
-        const topic = await client.createForumTopic(chatId, `🤖 [${config.machine.name}] ${topicName}`);
+        const thread = await channel.createThread(chatId, `🤖 [${config.machine.name}] ${topicName}`);
 
-        createSessionWithTopic(chatId, topic.message_thread_id, session.id, topicName, config.machine.id, config.machine.name);
+        createSessionWithTopic(chatIdNum, parseInt(thread.threadId), session.id, topicName, config.machine.id, config.machine.name);
 
         console.log(`📌 [Sync] Created topic for Chronicle session: ${session.id.slice(0, 8)} -> "${topicName}"`);
 
@@ -755,14 +804,14 @@ async function syncChronicleToTopics(
           const sessionInfo = `\n🔗 ${session.id}`;
           const lastMsg = session.lastMessage ? `\n\n💬 Last message:\n${session.lastMessage.slice(0, 300)}` : '';
           const resumeCmd = `\nResume: copilot --resume ${session.id}`;
-          await client.sendMessage(chatId, `📚 Session imported from Copilot CLI${dirInfo}${timeInfo}${sessionInfo}\n\n${fullSummary.slice(0, 200)}${lastMsg}\n\n${resumeCmd}\n\nContinue this session by sending a message here.`, {
-            message_thread_id: topic.message_thread_id,
+          await channel.send(chatId, `📚 Session imported from Copilot CLI${dirInfo}${timeInfo}${sessionInfo}\n\n${fullSummary.slice(0, 200)}${lastMsg}\n\n${resumeCmd}\n\nContinue this session by sending a message here.`, {
+            threadId: thread.threadId,
           });
         } catch (msgErr: any) {
           console.log(`⚠️ [Sync] Welcome message failed for ${session.id.slice(0, 8)}: ${msgErr.message}`);
           try {
-            await client.sendMessage(chatId, `📚 Session imported from Copilot CLI\n\n${(session.summary || 'New session').slice(0, 200)}\n\nResume: copilot --resume ${session.id}`, {
-              message_thread_id: topic.message_thread_id,
+            await channel.send(chatId, `📚 Session imported from Copilot CLI\n\n${(session.summary || 'New session').slice(0, 200)}\n\nResume: copilot --resume ${session.id}`, {
+              threadId: thread.threadId,
             });
           } catch { /* topic exists, message is optional */ }
         }
@@ -791,14 +840,14 @@ async function syncChronicleToTopics(
  * Runs every 30 seconds to check for new sessions
  */
 async function startChronicleSync(
-  client: TelegramClient,
-  chatId: number,
+  channel: Channel,
+  chatId: string,
   config: Config
 ): Promise<void> {
   console.log('🔄 Starting Chronicle sync (every 30s)...');
 
   while (isRunning) {
-    await syncChronicleToTopics(client, chatId, config);
+    await syncChronicleToTopics(channel, chatId, config);
     await sleep(30000); // Check every 30 seconds
   }
 }

@@ -164,7 +164,7 @@ async function handleCreateSchedule(action: CreateScheduleAction): Promise<Actio
     config.github.repoPath,
     parsed.humanReadable,
     parsed.cronExpression,
-    { type: 'telegram_message', message: action.message || parsed.message },
+    { type: 'channel_message', channel: config.channels.active, message: action.message || parsed.message },
     config
   );
 
@@ -366,7 +366,7 @@ async function handleShowStatus(): Promise<ActionResult> {
   if (chronicleStats) {
     response += `*Copilot Chronicle:*\n`;
     response += `• Sessions: ${chronicleStats.totalSessions}\n`;
-    response += `• Total turns: ${chronicleStats.totalTurns}\n`;
+    response += `• Turns (last 5): ${chronicleStats.totalTurns}\n`;
     if (chronicleStats.newestSession) {
       response += `• Latest: ${formatTimeAgo(chronicleStats.newestSession)}\n`;
     }

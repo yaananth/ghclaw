@@ -116,6 +116,26 @@ export interface Channel {
 
   /** Stop the channel (cleanup, disconnect) */
   stop(): Promise<void>;
+
+  // ---- Optional capabilities (channel-specific) ----
+
+  /** React to a message with an emoji (e.g. 👀 acknowledgment). Pass empty string to clear. */
+  setReaction?(chatId: string, messageId: string, emoji: string): Promise<void>;
+
+  /** Create a thread/topic in the channel */
+  createThread?(chatId: string, name: string): Promise<{ threadId: string; name: string }>;
+
+  /** Rename an existing thread/topic */
+  renameThread?(chatId: string, threadId: string, name: string): Promise<void>;
+
+  /** Get chat/group info (e.g. check if forum mode is enabled) */
+  getChatInfo?(chatId: string): Promise<{ isForum: boolean; title?: string }>;
+
+  /** Register bot commands (shown in command menu) */
+  setCommands?(commands: { command: string; description: string }[]): Promise<void>;
+
+  /** Delete webhook (needed for polling-based channels) */
+  deleteWebhook?(): Promise<void>;
 }
 
 // ============================================================================

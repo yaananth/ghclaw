@@ -1,12 +1,14 @@
 /**
  * GitHub Actions Workflow YAML Generation
  * Generates workflow files for reminders (self-deleting) and recurring schedules.
+ * Channel-aware: generates channel-specific notification steps.
  */
 
 import * as crypto from 'crypto';
 
 export interface ScheduleAction {
-  type: 'telegram_message';
+  type: 'channel_message';
+  channel: string;         // 'telegram' | 'discord' | 'slack' | ...
   message: string;
 }
 
@@ -56,8 +58,58 @@ function base64Encode(text: string): string {
 }
 
 /**
+ * Generate the channel-specific send step for a workflow.
+ * Returns the YAML run/env block for the given channel.
+ */
+function generateChannelSendStep(
+  channel: string,
+  encodedMessageVar: string,
+  stepName: string
+): string {
+  switch (channel) {
+    case 'telegram':
+      return `      - name: ${stepName}
+        run: |
+          MSG_TEXT="$(echo "\$${encodedMessageVar}" | base64 -d)"
+          curl -s -X POST "https://api.telegram.org/bot\$BOT_TOKEN/sendMessage" \\
+            --data-urlencode "chat_id=\$CHAT_ID" \\
+            --data-urlencode "text=\$MSG_TEXT" \\
+            \${THREAD_ID:+--data-urlencode "message_thread_id=\$THREAD_ID"}
+        env:
+          BOT_TOKEN: \${{ secrets.TELEGRAM_BOT_TOKEN }}
+          CHAT_ID: \${{ secrets.TELEGRAM_CHAT_ID }}
+          THREAD_ID: \${{ secrets.TELEGRAM_THREAD_ID }}`;
+
+    // Future channel implementations:
+    // case 'discord':
+    //   return `      - name: ${stepName}
+    //     run: |
+    //       MSG_TEXT="$(echo "\$${encodedMessageVar}" | base64 -d)"
+    //       curl -s -X POST "\$WEBHOOK_URL" \\
+    //         -H "Content-Type: application/json" \\
+    //         -d "{\"content\": \"\$MSG_TEXT\"}"
+    //     env:
+    //       WEBHOOK_URL: \${{ secrets.DISCORD_WEBHOOK_URL }}`;
+
+    // case 'slack':
+    //   return `      - name: ${stepName}
+    //     run: |
+    //       MSG_TEXT="$(echo "\$${encodedMessageVar}" | base64 -d)"
+    //       curl -s -X POST "\$WEBHOOK_URL" \\
+    //         -H "Content-Type: application/json" \\
+    //         -d "{\"text\": \"\$MSG_TEXT\"}"
+    //     env:
+    //       WEBHOOK_URL: \${{ secrets.SLACK_WEBHOOK_URL }}`;
+
+    default:
+      // Default to telegram for backward compatibility
+      return generateChannelSendStep('telegram', encodedMessageVar, stepName);
+  }
+}
+
+/**
  * Generate a one-shot reminder workflow YAML
- * Fires at cron time, sends Telegram message, then deletes its own workflow file.
+ * Fires at cron time, sends message via configured channel, then deletes its own workflow file.
  *
  * Security: Message is base64-encoded to prevent GitHub Actions expression injection
  * and YAML structure breakout. Decoded at runtime in the shell step.
@@ -67,12 +119,15 @@ export function generateReminderWorkflow(
   message: string,
   cronExpression: string,
   chatId: string,
-  threadId?: string
+  threadId?: string,
+  channel: string = 'telegram'
 ): string {
   const safeId = validateId(id);
   const safeCron = validateCron(cronExpression);
   const safeName = sanitizeForYamlName(message);
   const encodedMessage = base64Encode(`🔔 Reminder: ${message}`);
+
+  const sendStep = generateChannelSendStep(channel, 'REMINDER_TEXT_B64', 'Send reminder');
 
   return `name: "Reminder: ${safeName}"
 on:
@@ -86,17 +141,7 @@ jobs:
   remind:
     runs-on: ubuntu-latest
     steps:
-      - name: Send reminder
-        run: |
-          REMINDER_TEXT="$(echo "\$REMINDER_TEXT_B64" | base64 -d)"
-          curl -s -X POST "https://api.telegram.org/bot\$BOT_TOKEN/sendMessage" \\
-            --data-urlencode "chat_id=\$CHAT_ID" \\
-            --data-urlencode "text=\$REMINDER_TEXT" \\
-            \${THREAD_ID:+--data-urlencode "message_thread_id=\$THREAD_ID"}
-        env:
-          BOT_TOKEN: \${{ secrets.TELEGRAM_BOT_TOKEN }}
-          CHAT_ID: \${{ secrets.TELEGRAM_CHAT_ID }}
-          THREAD_ID: \${{ secrets.TELEGRAM_THREAD_ID }}
+${sendStep}
           REMINDER_TEXT_B64: "${encodedMessage}"
 
       - name: Self-cleanup
@@ -114,7 +159,7 @@ jobs:
 
 /**
  * Generate a persistent recurring schedule workflow YAML
- * Fires on cron schedule, sends Telegram message. Does NOT self-delete.
+ * Fires on cron schedule, sends message via configured channel. Does NOT self-delete.
  */
 export function generateScheduleWorkflow(
   id: string,
@@ -126,6 +171,8 @@ export function generateScheduleWorkflow(
   const safeName = sanitizeForYamlName(name);
   const encodedMessage = base64Encode(`📅 ${action.message}`);
 
+  const sendStep = generateChannelSendStep(action.channel, 'SCHEDULE_TEXT_B64', 'Send scheduled message');
+
   return `name: "Schedule: ${safeName}"
 on:
   schedule:
@@ -135,17 +182,7 @@ jobs:
   run:
     runs-on: ubuntu-latest
     steps:
-      - name: Send scheduled message
-        run: |
-          SCHEDULE_TEXT="$(echo "\$SCHEDULE_TEXT_B64" | base64 -d)"
-          curl -s -X POST "https://api.telegram.org/bot\$BOT_TOKEN/sendMessage" \\
-            --data-urlencode "chat_id=\$CHAT_ID" \\
-            --data-urlencode "text=\$SCHEDULE_TEXT" \\
-            \${THREAD_ID:+--data-urlencode "message_thread_id=\$THREAD_ID"}
-        env:
-          BOT_TOKEN: \${{ secrets.TELEGRAM_BOT_TOKEN }}
-          CHAT_ID: \${{ secrets.TELEGRAM_CHAT_ID }}
-          THREAD_ID: \${{ secrets.TELEGRAM_THREAD_ID }}
+${sendStep}
           SCHEDULE_TEXT_B64: "${encodedMessage}"
 `;
 }

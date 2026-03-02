@@ -89,6 +89,36 @@ export class TelegramChannel implements Channel {
   }
 
   // ============================================================================
+  // Optional Channel capabilities
+  // ============================================================================
+
+  async setReaction(chatId: string, messageId: string, emoji: string): Promise<void> {
+    await this.client.setReaction(parseInt(chatId), parseInt(messageId), emoji);
+  }
+
+  async createThread(chatId: string, name: string): Promise<{ threadId: string; name: string }> {
+    const topic = await this.client.createForumTopic(parseInt(chatId), name);
+    return { threadId: topic.message_thread_id.toString(), name: topic.name };
+  }
+
+  async renameThread(chatId: string, threadId: string, name: string): Promise<void> {
+    await this.client.editForumTopic(parseInt(chatId), parseInt(threadId), name);
+  }
+
+  async getChatInfo(chatId: string): Promise<{ isForum: boolean; title?: string }> {
+    const chat = await this.client.getChat(parseInt(chatId));
+    return { isForum: chat.is_forum === true, title: chat.title };
+  }
+
+  async setCommands(commands: { command: string; description: string }[]): Promise<void> {
+    await this.client.setMyCommands(commands);
+  }
+
+  async deleteWebhook(): Promise<void> {
+    await this.client.deleteWebhook();
+  }
+
+  // ============================================================================
   // Telegram-specific helpers
   // ============================================================================
 

@@ -1,6 +1,6 @@
 # Architecture
 
-ghclaw is a local middle manager AI that bridges Telegram to GitHub Copilot CLI's full agent ecosystem. It runs entirely on your machine with all connections outbound — no exposed ports, no webhooks.
+ghclaw is a local middle manager AI that bridges messaging channels to GitHub Copilot CLI's full agent ecosystem. It runs entirely on your machine with all connections outbound — no exposed ports, no webhooks.
 
 ## System Overview
 
@@ -12,12 +12,14 @@ ghclaw is a local middle manager AI that bridges Telegram to GitHub Copilot CLI'
 │  │  ghclaw daemon                                                      │  │
 │  │                                                                      │  │
 │  │  ┌──────────────┐    ┌──────────────────────────────────────────┐   │  │
-│  │  │   Telegram     │───▶│  Security Layer                          │   │  │
-│  │  │   Client       │    │  - User allowlist (fail-closed)          │   │  │
-│  │  │   (polling)    │    │  - Group restriction                     │   │  │
-│  │  │               │    │  - DM blocking                           │   │  │
-│  │  │               │    │  - Secret prefix                        │   │  │
-│  │  │               │    │  - Topic restriction                     │   │  │
+│  │  │  Channel       │───▶│  Security Layer                          │   │  │
+│  │  │  Interface     │    │  - Per-channel security (fail-closed)     │   │  │
+│  │  │  (polling)     │    │  - Telegram: user/group/DM/prefix/topic  │   │  │
+│  │  │               │    │  - Non-Telegram: blocked until implemented│   │  │
+│  │  │  Registry:     │    │                                          │   │  │
+│  │  │  - Telegram    │    │                                          │   │  │
+│  │  │  - (Discord)   │    │                                          │   │  │
+│  │  │  - (Slack)     │    │                                          │   │  │
 │  │  └──────────────┘    └──────────────────────────────────────────┘   │  │
 │  │                                   │                                  │  │
 │  │                                   ▼                                  │  │
@@ -45,7 +47,7 @@ ghclaw is a local middle manager AI that bridges Telegram to GitHub Copilot CLI'
 │  │                                   │                                  │  │
 │  │                                   ▼                                  │  │
 │  │  ┌──────────────┐    ┌──────────────────────────────────┐          │  │
-│  │  │  Streaming    │──▶ │  Telegram: send / edit messages   │          │  │
+│  │  │  Streaming    │──▶ │  Channel: send / edit messages    │          │  │
 │  │  │  Response     │    │  (action blocks hidden from user) │          │  │
 │  │  └──────────────┘    └──────────────────────────────────┘          │  │
 │  └──────────────────────────────────────────────────────────────────────┘  │
@@ -79,7 +81,7 @@ LLM response:
 ```
 
 The daemon:
-1. Streams the LLM response to Telegram (hiding action blocks from display)
+1. Streams the LLM response to the active channel (hiding action blocks from display)
 2. Parses action blocks from the full response text
 3. Validates actions against a strict schema (allowlisted action types + fields)
 4. Executes validated actions via handlers
@@ -101,7 +103,7 @@ The daemon:
 - `memory/machines/{id}.json` — per-machine snapshots
 - `.github/workflows/remind-*.yml` — one-shot reminder workflows
 - `.github/workflows/sched-*.yml` — persistent schedule workflows
-- `.github/workflows/notify.yml` — base Telegram notification workflow
+- `.github/workflows/notify.yml` — base notification workflow (channel-aware)
 
 Sync loop runs every 5 seconds: `git pull → export → commit/push if changed`.
 
@@ -129,7 +131,7 @@ Sync loop runs every 5 seconds: `git pull → export → commit/push if changed`
 
 **Why:** Webhooks require exposing a public endpoint (firewall, HTTPS, security).
 
-**How:** Long-poll Telegram's `getUpdates` API. All connections outbound.
+**How:** Channels use outbound polling (e.g., Telegram's `getUpdates` API). All connections outbound.
 
 ### 6. Delegate Memory to Copilot CLI
 
@@ -137,7 +139,7 @@ Sync loop runs every 5 seconds: `git pull → export → commit/push if changed`
 
 **How:** ghclaw only stores a minimal mapping:
 ```
-Telegram (chat_id, thread_id) → Copilot session UUID + machine_id
+Channel (chat_id, thread_id, channel_type) → Copilot session UUID + machine_id
 ```
 
 ### 7. OS Keychain for Secrets
@@ -150,37 +152,44 @@ Telegram (chat_id, thread_id) → Copilot session UUID + machine_id
 
 **Why:** Users need immediate feedback that ghclaw received their message.
 
-**How:** 👀 emoji reaction via Telegram's `setMessageReaction` API on receipt. Cleared after response is sent. Best-effort (non-blocking).
+**How:** 👀 emoji reaction via channel's reaction API on receipt (e.g., Telegram's `setMessageReaction`). Cleared after response is sent. Best-effort (non-blocking). Only for channels that support reactions.
+
+### 9. Channel Abstraction
+
+**Why:** The daemon was hardcoded to Telegram. Adding new channels (Discord, Slack) would require forking the entire daemon.
+
+**How:** A `Channel` interface (`src/channels/channel.ts`) abstracts messaging operations: `poll()`, `send()`, `edit()`, `start()`, `stop()`, `getInfo()`. Optional methods (`setReaction()`, `createThread()`, `renameThread()`, `getChatInfo()`) support channel-specific capabilities. `TelegramChannel` is the first implementation.
+
+A **Channel Registry** (`src/channels/registry.ts`) auto-detects configured channels by checking keychain for tokens. If only one channel is configured, it's auto-selected. If multiple are configured, the user's preference from `config.channels.active` is used.
+
+**Security model:** Fail-closed per channel. Non-Telegram channels are rejected until they implement their own security checks. Each channel type is responsible for its own access controls.
 
 ## Data Flow
 
 ### Message Processing
 
 ```
-1. Telegram long-poll (getUpdates, 30s timeout)
+1. Channel poll (e.g., Telegram getUpdates, 30s timeout)
 
 2. Security Check (BEFORE any logging)
-   ├─▶ Fail-closed: reject if no access controls configured
-   ├─▶ Group restriction
-   ├─▶ User allowlist
-   ├─▶ DM blocking
-   ├─▶ Secret prefix strip
-   └─▶ Topic restriction
+   ├─▶ Channel-specific security (fail-closed for non-Telegram)
+   ├─▶ Telegram: group/user/DM/prefix/topic checks
+   └─▶ Future channels: blocked until security implemented
    → REJECT if any fails (no content logged for rejected messages)
 
-3. Acknowledge receipt (👀 reaction)
+3. Acknowledge receipt (👀 reaction, if channel supports it)
 
-4. Check /start, /help, /new commands (only 3 registered)
+4. Check channel-specific commands (/start, /help, /new for Telegram)
 
 5. Check session selection (number reply after session list)
 
 6. Session Lookup
-   ├─▶ getOrCreateSession(chatId, threadId)
+   ├─▶ getOrCreateSession(chatId, threadId, channelType)
    ├─▶ Check machine_id ownership
    └─▶ Wrong machine → redirect notice, STOP
 
-7. Auto-create forum topic (if in main chat of forum group)
-   └─▶ AI-generated topic title (background)
+7. Auto-create thread (if channel supports threading and in main chat)
+   └─▶ AI-generated thread title (background)
 
 8. Build system prompt
    ├─▶ Load instructions.md (action block format + available actions)
@@ -188,9 +197,9 @@ Telegram (chat_id, thread_id) → Copilot session UUID + machine_id
 
 9. Copilot CLI Execution
    ├─▶ copilot --resume <session-id> -p "prompt" --silent
-   └─▶ Stream stdout via streamToTelegramCollecting()
+   └─▶ Stream stdout via streamToChannelCollecting()
 
-10. Stream to Telegram
+10. Stream to Channel
     ├─▶ Create message with typing cursor (▌)
     ├─▶ Edit as chunks arrive (300ms throttle)
     ├─▶ Hide json:ghclaw-action blocks from display
@@ -201,7 +210,7 @@ Telegram (chat_id, thread_id) → Copilot session UUID + machine_id
     ├─▶ Validate against schema (allowlisted types + fields)
     └─▶ executeAction() → handler result sent as follow-up
 
-12. Clear 👀 reaction
+12. Clear 👀 reaction (if channel supports it)
 ```
 
 ### GitHub Sync
@@ -224,7 +233,7 @@ Every 5 seconds:
 5. Creates .github/workflows/remind-{id}.yml
 6. git commit && push
 7. GitHub Actions fires at scheduled time
-8. Workflow sends Telegram message via bot token secret
+8. Workflow sends message via active channel's API (channel-aware workflow step)
 9. Workflow self-deletes its own YAML file
 ```
 
@@ -236,7 +245,7 @@ Every 5 seconds:
 ├── daemon.lock           # PID file when daemon running
 ├── daemon.log            # Daemon output
 ├── data/
-│   └── sessions.sqlite   # Telegram → Copilot session mapping + synced Chronicle IDs
+│   └── sessions.sqlite   # Channel → Copilot session mapping + synced Chronicle IDs
 └── repo/                 # Git clone of {user}/.ghclaw
     ├── memory/
     │   ├── sessions.json
@@ -262,14 +271,15 @@ src/
 │   ├── parser.ts         # Regex extraction + JSON parsing + schema validation
 │   ├── handlers.ts       # Action dispatch + per-action handlers
 │   └── index.ts          # Barrel exports
-├── channels/             # Channel abstraction (unused — daemon uses TelegramClient directly)
-│   ├── channel.ts        # Channel interface, types, streamToChannel()
-│   ├── telegram.ts       # TelegramChannel implements Channel
-│   └── index.ts          # Barrel exports
+├── channels/             # Channel abstraction layer (daemon uses this)
+│   ├── channel.ts        # Channel interface, ChannelMessage, SendOptions, streamToChannel()
+│   ├── telegram.ts       # TelegramChannel implements Channel (threads, reactions, etc.)
+│   ├── registry.ts       # Channel detection, auto-selection, registry
+│   └── index.ts          # Barrel exports (Channel, TelegramChannel, registry)
 ├── telegram/
 │   ├── client.ts         # Low-level Telegram API client (send, edit, react, topics)
-│   ├── security.ts       # Security checks (fail-closed, allowlist, group, DM, prefix, topic)
-│   └── commands.ts       # Minimal command handlers (/start, /help, /new only)
+│   ├── security.ts       # Telegram-specific security checks (fail-closed, allowlist, group, DM, prefix, topic)
+│   └── commands.ts       # Telegram-specific command handlers (/start, /help, /new)
 ├── copilot/
 │   ├── session.ts        # Copilot CLI execution (--resume, -p, streaming)
 │   ├── discovery.ts      # Feature discovery (tools, commands, models, agents)
@@ -281,34 +291,34 @@ src/
 │   ├── auth.ts           # Centralized gh CLI auth, scope checking
 │   ├── repo.ts           # Repo provisioning, git operations
 │   ├── sync.ts           # Git sync loop (5s interval)
-│   └── workflows.ts      # GitHub Actions YAML generation
+│   └── workflows.ts      # Channel-aware GitHub Actions YAML generation
 ├── schedules/
 │   ├── parser.ts         # NLP schedule parsing via Copilot CLI
-│   ├── reminders.ts      # Reminder CRUD (workflow files)
+│   ├── reminders.ts      # Reminder CRUD (channel-aware workflow files)
 │   ├── recurring.ts      # Recurring schedule CRUD
 │   └── agent.ts          # Copilot Coding Agent fallback (gh issue create)
 ├── memory/
-│   └── session-mapper.ts # SQLite session mapping + synced Chronicle IDs
+│   └── session-mapper.ts # SQLite channel-neutral session mapping + synced Chronicle IDs
 ├── secrets/
 │   └── keychain.ts       # OS keychain abstraction
-├── config.ts             # Config loading (keychain + local file)
-├── daemon.ts             # Main daemon (polling, processing, action execution)
+├── config.ts             # Config loading (keychain + local file, includes channels config)
+├── daemon.ts             # Main daemon (Channel interface, polling, processing, action execution)
 └── cli/
-    ├── setup.ts          # Interactive setup wizard (includes gh-aw init)
+    ├── setup.ts          # Interactive setup wizard (channel detection + gh-aw init)
     └── doctor.ts         # Health checks
 ```
 
 ## Multi-Machine Support
 
-Multiple machines share the same Telegram group. Each machine:
+Multiple machines share the same channel group/workspace. Each machine:
 - Gets a unique identity (UUID + hostname) on first run
-- Creates topics tagged: `🤖 [MacBook] Fix auth bug`
+- Creates threads tagged: `🤖 [MacBook] Fix auth bug` (if channel supports threading)
 - Owns its sessions via `machine_id` in the session mapper
 - Syncs its data to `memory/machines/{id}.json` in the GitHub repo
 
 ### Soft Routing
 
-All machines poll the same group. When a message arrives:
+All machines poll the same channel. When a message arrives:
 1. Look up session → check `machine_id`
 2. **Match** → process normally
 3. **Mismatch** → reply: "This session lives on [machine]. Resume there."
@@ -320,7 +330,7 @@ See [Security](security.md) for the detailed security model.
 
 Six layers:
 1. **Network**: All outbound, no exposed ports
-2. **Access Control**: Fail-closed default, user allowlist, group restriction, DM blocking, secret prefix, topic restriction
+2. **Access Control**: Per-channel security (fail-closed). Telegram: user allowlist, group restriction, DM blocking, secret prefix, topic restriction. Non-Telegram: blocked until security implemented
 3. **Action Validation**: Schema validation, type allowlist, field sanitization, URL encoding
 4. **Data**: Secrets in OS keychain, error messages sanitized, no logging before security check
 5. **GitHub**: Private repo, repo-level secrets for Actions, `repo`+`workflow` scopes required

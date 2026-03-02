@@ -18,6 +18,7 @@ import { TelegramClient } from '../telegram/client';
 import { isChronicleAvailable, getRecentSessions } from '../copilot/chronicle';
 import { checkGhAuth, getGhUsername } from '../github/auth';
 import { checkRepoExists, createRepo, cloneRepo, initRepoStructure, setRepoSecrets } from '../github/repo';
+import { detectConfiguredChannels } from '../channels/registry';
 
 export async function runSetup(): Promise<void> {
   console.log(`
@@ -44,6 +45,32 @@ export async function runSetup(): Promise<void> {
     console.log('     export TELEGRAM_ALLOWED_GROUP_ID="your-group-id"');
     console.log('     export TELEGRAM_ALLOWED_USER_IDS="your-user-id"\n');
     return;
+  }
+
+  // Channel detection: detect which channels are already configured
+  const configuredChannels = await detectConfiguredChannels();
+  let selectedChannel = 'telegram'; // default
+
+  if (configuredChannels.length === 0) {
+    console.log('─────────────────────────────────────────────────────────────');
+    console.log('Channel Selection\n');
+    console.log('  No channels configured yet. Currently supported:');
+    console.log('  - Telegram (via Bot API)\n');
+    // Only Telegram for now — auto-select
+    selectedChannel = 'telegram';
+    console.log(`  Auto-selected: Telegram\n`);
+  } else if (configuredChannels.length === 1) {
+    selectedChannel = configuredChannels[0].type;
+    console.log(`Channel: ${selectedChannel} (only configured channel)\n`);
+  } else {
+    // Multiple channels configured — ask user
+    const { channelChoice } = await inquirer.prompt([{
+      type: 'list',
+      name: 'channelChoice',
+      message: 'Multiple channels configured. Which to set up?',
+      choices: configuredChannels.map(c => ({ name: c.type, value: c.type })),
+    }]);
+    selectedChannel = channelChoice;
   }
 
   // Load existing config
@@ -589,6 +616,10 @@ export async function runSetup(): Promise<void> {
     copilot: { yoloMode },
     memory: { dbPath: path.join(configDir, 'data', 'memory.sqlite') },
     github: githubConfig,
+    channels: {
+      active: selectedChannel,
+      configured: [selectedChannel],
+    },
   });
 
   // Summary
