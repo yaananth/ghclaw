@@ -118,6 +118,10 @@ export class TelegramChannel implements Channel {
     await this.client.deleteWebhook();
   }
 
+  async pinMessage(chatId: string, messageId: string): Promise<void> {
+    await this.client.pinChatMessage(parseInt(chatId), parseInt(messageId), { disable_notification: true });
+  }
+
   // ============================================================================
   // Telegram-specific helpers
   // ============================================================================

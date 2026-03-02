@@ -294,6 +294,26 @@ export class TelegramClient {
   }
 
   /**
+   * Pin a message in a chat
+   */
+  async pinChatMessage(chatId: number, messageId: number, options: { disable_notification?: boolean } = {}): Promise<void> {
+    const body: Record<string, unknown> = {
+      chat_id: chatId,
+      message_id: messageId,
+      ...options,
+    };
+    const response = await fetch(`${this.baseUrl}/pinChatMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await response.json() as { ok: boolean; description?: string };
+    if (!data.ok) {
+      throw new Error(`Failed to pin message: ${data.description || 'Unknown error'}`);
+    }
+  }
+
+  /**
    * Delete a forum topic and all its messages
    */
   async deleteForumTopic(

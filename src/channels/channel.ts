@@ -136,6 +136,9 @@ export interface Channel {
 
   /** Delete webhook (needed for polling-based channels) */
   deleteWebhook?(): Promise<void>;
+
+  /** Pin a message in a chat/thread */
+  pinMessage?(chatId: string, messageId: string): Promise<void>;
 }
 
 // ============================================================================
