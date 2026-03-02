@@ -281,6 +281,7 @@ async function handleCreateAgenticSchedule(action: CreateAgenticScheduleAction):
     }
 
     // Use Copilot CLI to write the workflow markdown with the user's intent
+    // Prompt tells CLI to fetch latest gh-aw docs on the fly before writing
     const writePrompt = loadPrompt('ghaw-workflow', {
       workflowPath,
       template,
@@ -288,30 +289,33 @@ async function handleCreateAgenticSchedule(action: CreateAgenticScheduleAction):
       schedule: action.schedule,
       description: action.description,
       repoPath: config.github.repoPath,
+      repoOwner: config.github.username,
+      repoName: config.github.repoName,
       workflowName,
     });
 
     const copilotOptions: CopilotSessionOptions = {
       cliPath: config.copilot.cliPath,
-      yoloMode: true, // Needs file write + shell access
+      yoloMode: true, // Needs file write + shell + web fetch access
       workingDir: config.github.repoPath,
     };
 
     const result = await executeSimple(writePrompt, copilotOptions);
 
-    // Verify the compiled YAML exists
-    const compiledPath = path.join(config.github.repoPath, '.github', 'workflows', `${workflowName}.yml`);
-    const compiled = fs.existsSync(compiledPath);
+    // Verify the compiled lock file exists (gh-aw outputs .lock.yml)
+    const lockPath = path.join(config.github.repoPath, '.github', 'workflows', `${workflowName}.lock.yml`);
+    const ymlPath = path.join(config.github.repoPath, '.github', 'workflows', `${workflowName}.yml`);
+    const compiled = fs.existsSync(lockPath) || fs.existsSync(ymlPath);
 
     if (!compiled) {
       return {
-        response: `⚠️ *Agentic schedule created but compilation uncertain.*\n\n📝 ${action.name}\n⏰ ${action.schedule}\n\nThe LLM wrote the workflow markdown. Check \`${workflowPath}\` and run \`gh aw compile\` manually if needed.\n\n_Agent output:_\n${result.slice(0, 300)}`,
+        response: `⚠️ *Agentic schedule created but compilation uncertain.*\n\n📝 ${action.name}\n⏰ ${action.schedule}\n\nThe LLM wrote the workflow markdown. Check \`${workflowPath}\` and run \`gh aw compile\` manually if needed.\n\n_Agent output:_\n${result.slice(0, 500)}`,
         parseMode: 'Markdown',
       };
     }
 
     return {
-      response: `🤖 *Agentic schedule created!*\n\n📝 ${action.name}\n⏰ ${action.schedule}\n✅ Compiled to GitHub Actions YAML\n\n_This workflow uses an LLM agent and runs via GitHub Actions._`,
+      response: `🤖 *Agentic schedule created!*\n\n📝 ${action.name}\n⏰ ${action.schedule}\n✅ Compiled to GitHub Actions\n\n_Agent output:_\n${result.slice(0, 500)}`,
       parseMode: 'Markdown',
     };
   } catch (err: any) {

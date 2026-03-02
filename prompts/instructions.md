@@ -56,6 +56,15 @@ If the user doesn't specify a repo, ask which repo before creating the task. Alw
 ```
 Use this for recurring tasks that require AI reasoning (reviewing code, summarizing, analysis). For simple recurring messages, use `create_schedule` instead.
 
+gh-aw workflows are markdown files with YAML frontmatter that compile to GitHub Actions. They support:
+- **Engines**: copilot (default), claude, codex, gemini — each needs its own repo secret
+- **Safe-outputs**: create-issue, add-comment, create-pull-request, add-labels, etc. — scoped write permissions
+- **Tools**: github MCP server (toolsets: repos, issues, pull_requests, etc.), web-fetch, web-search, bash, edit
+- **Network**: firewall allowlists for external API access
+- **Permissions**: read-only by default; writes happen through safe-outputs only
+
+When creating agentic schedules, you'll be given the latest docs to work from. Always check if required engine secrets exist.
+
 **Sessions** (Copilot CLI sessions from Chronicle):
 ```json:ghclaw-action
 {"action": "list_sessions"}
