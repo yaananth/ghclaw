@@ -24,6 +24,8 @@ import { createReminder, listReminders, cancelReminder } from '../schedules/remi
 import { createSchedule, listSchedules, deleteSchedule } from '../schedules/recurring';
 import { createCodingAgentTask } from '../copilot/agent';
 import { ghAwNew, ghAwCompile } from '../ghaw/executor';
+import { executeSimple, type SessionOptions as CopilotSessionOptions } from '../copilot/session';
+import { loadPrompt } from '../prompts';
 import {
   getRecentSessions,
   getActiveSessions,
@@ -40,6 +42,8 @@ import {
   getSessionStats as getTelegramSessionStats,
 } from '../memory/session-mapper';
 import { getSyncState } from '../github/sync';
+import * as path from 'path';
+import * as fs from 'fs';
 
 /**
  * Execute an action and return the result to send to the user.
@@ -262,16 +266,52 @@ async function handleCreateAgenticSchedule(action: CreateAgenticScheduleAction):
   }
 
   try {
-    // Create gh-aw workflow in sync repo
+    // Create gh-aw workflow template in sync repo
     const workflowName = action.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 30);
     await ghAwNew(config.github.repoPath, workflowName);
 
-    // TODO: Write the workflow markdown with action.description and action.schedule
-    // Then compile it
-    await ghAwCompile(config.github.repoPath);
+    const workflowPath = path.join(config.github.repoPath, '.github', 'workflows', `${workflowName}.md`);
+
+    // Read the template that gh-aw created
+    let template = '';
+    try {
+      template = fs.readFileSync(workflowPath, 'utf-8');
+    } catch {
+      template = '';
+    }
+
+    // Use Copilot CLI to write the workflow markdown with the user's intent
+    const writePrompt = loadPrompt('ghaw-workflow', {
+      workflowPath,
+      template,
+      name: action.name,
+      schedule: action.schedule,
+      description: action.description,
+      repoPath: config.github.repoPath,
+      workflowName,
+    });
+
+    const copilotOptions: CopilotSessionOptions = {
+      cliPath: config.copilot.cliPath,
+      yoloMode: true, // Needs file write + shell access
+      workingDir: config.github.repoPath,
+    };
+
+    const result = await executeSimple(writePrompt, copilotOptions);
+
+    // Verify the compiled YAML exists
+    const compiledPath = path.join(config.github.repoPath, '.github', 'workflows', `${workflowName}.yml`);
+    const compiled = fs.existsSync(compiledPath);
+
+    if (!compiled) {
+      return {
+        response: `⚠️ *Agentic schedule created but compilation uncertain.*\n\n📝 ${action.name}\n⏰ ${action.schedule}\n\nThe LLM wrote the workflow markdown. Check \`${workflowPath}\` and run \`gh aw compile\` manually if needed.\n\n_Agent output:_\n${result.slice(0, 300)}`,
+        parseMode: 'Markdown',
+      };
+    }
 
     return {
-      response: `🤖 *Agentic schedule created!*\n\n📝 ${action.name}\n⏰ ${action.schedule}\n\n_This workflow uses an LLM agent and runs via GitHub Actions._`,
+      response: `🤖 *Agentic schedule created!*\n\n📝 ${action.name}\n⏰ ${action.schedule}\n✅ Compiled to GitHub Actions YAML\n\n_This workflow uses an LLM agent and runs via GitHub Actions._`,
       parseMode: 'Markdown',
     };
   } catch (err: any) {

@@ -1,6 +1,11 @@
-# ghclaw
+<p align="center">
+  <img src="assets/ghclaw-banner.png" alt="GHClaw" width="500">
+</p>
 
-Local AI middle manager powered by Copilot CLI. Bridges messaging channels (Telegram, with Discord/Slack planned) to GitHub's full agent ecosystem — delegates coding tasks, manages schedules, syncs memory across machines, all without exposing your machine to the internet.
+<p align="center">
+<p align="center">
+  Local AI middle manager powered by Copilot CLI. Bridges messaging channels (Telegram, with Discord/Slack planned) to GitHub's full agent ecosystem — delegates coding tasks, manages schedules, syncs memory across machines, all without exposing your machine to the internet.
+</p>
 
 ## Installation
 
@@ -189,7 +194,7 @@ ghclaw doesn't just forward messages — it understands them:
 7. **Recurring schedule** → Creates cron GitHub Actions workflow
 8. **Agentic schedule** → Creates gh-aw workflow (LLM agent on schedule)
 
-All routing is LLM-driven — no intent classifier. The system prompt in `instructions.md` describes available actions, and the LLM outputs structured action blocks when needed.
+All routing is LLM-driven — no intent classifier. The system prompt in `prompts/instructions.md` describes available actions, and the LLM outputs structured action blocks when needed.
 
 ### GitHub as Backbone
 

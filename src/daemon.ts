@@ -40,6 +40,7 @@ import { getGhToken } from './github/auth';
 import { startSyncLoop } from './github/sync';
 import * as fs from 'fs';
 import * as path from 'path';
+import { loadPrompt } from './prompts';
 
 let isRunning = false;
 let discovery: CopilotDiscovery | null = null;
@@ -51,7 +52,7 @@ let discovery: CopilotDiscovery | null = null;
 async function generateTopicTitle(message: string, cliPath: string = 'copilot'): Promise<string> {
   const cwd = process.cwd();
   const dirName = require('path').basename(cwd);
-  const titlePrompt = `Generate a very short title (3-6 words max) for a chat topic about this message. The project directory is "${dirName}". Reply with ONLY the title, nothing else. No quotes, no punctuation at the end.\n\nMessage: ${message.slice(0, 200)}`;
+  const titlePrompt = loadPrompt('topic-title', { dirName, message: message.slice(0, 200) });
 
   const proc = Bun.spawn([cliPath, '-p', titlePrompt, '--silent'], {
     stdout: 'pipe',
@@ -440,6 +441,12 @@ async function processMessageInner(
 
       console.log(`📌 Auto-created topic ${targetThreadId}`);
 
+      // Pin session ID to the topic for easy reference
+      if (channel.pinMessage) {
+        const pinMsg = await channel.send(chatId, `📌 Session: \`${session.id}\`\nResume: \`copilot --resume ${session.id}\``, { threadId: targetThreadId, format: 'markdown' });
+        channel.pinMessage(chatId, pinMsg.id).catch(() => {});
+      }
+
       // Generate AI title in background and rename
       const topicThreadId = targetThreadId;
       const sessionIdForRename = session.id;
@@ -558,8 +565,6 @@ async function processMessageInner(
 }
 
 function buildSystemPrompt(session: TelegramSession): string {
-  const parts: string[] = [];
-
   // Sanitize session name to prevent injection
   const safeName = session.name
     .replace(/[\n\r]/g, ' ')
@@ -569,44 +574,45 @@ function buildSystemPrompt(session: TelegramSession): string {
     .slice(0, 50);
 
   // Load instructions from file (contains action block format + available actions)
-  const instructionsPath = path.resolve(__dirname, '..', 'instructions.md');
+  let instructions: string;
   try {
-    const instructions = fs.readFileSync(instructionsPath, 'utf-8');
+    const raw = loadPrompt('instructions');
     // Strip markdown headers for cleaner prompt
-    const cleaned = instructions
+    instructions = raw
       .replace(/^#+\s+.*$/gm, '')  // Remove # headers
       .replace(/\n{3,}/g, '\n\n') // Collapse multiple newlines
       .trim();
-    parts.push(cleaned);
   } catch {
     // Fallback if file not found
-    parts.push(`You are ghclaw, a middle manager AI that coordinates work across GitHub Copilot CLI's capabilities.
-Your role: Understand what the user needs, pick the best approach, and execute effectively.`);
+    instructions = `You are ghclaw, a middle manager AI that coordinates work across GitHub Copilot CLI's capabilities.
+Your role: Understand what the user needs, pick the best approach, and execute effectively.`;
   }
 
-  parts.push(`\nSession: "${safeName}"`);
+  // Build discovery vars
+  let slashCommands = '';
+  let tools = '';
+  let models = '';
 
-  // Capabilities from discovery (auto-discovered from Copilot CLI at startup)
   if (discovery) {
     const slashCmds = discovery.features.filter(f => f.type === 'slash_command');
-
     if (slashCmds.length > 0) {
-      parts.push('\nCopilot CLI slash commands you can use inside sessions:');
-      for (const feature of slashCmds) {
-        parts.push(`- ${feature.name}: ${feature.description}`);
-      }
+      slashCommands = slashCmds.map(f => `- ${f.name}: ${f.description}`).join('\n');
     }
-
     if (discovery.tools.length > 0) {
-      parts.push('\nCopilot CLI tools available:');
-      parts.push(discovery.tools.slice(0, 15).join(', '));
+      tools = discovery.tools.slice(0, 15).join(', ');
     }
     if (discovery.models.length > 0) {
-      parts.push('\nAvailable models (pick best for task): ' + discovery.models.join(', '));
+      models = discovery.models.join(', ');
     }
   }
 
-  return parts.join('\n');
+  return loadPrompt('system-prompt', {
+    instructions,
+    sessionName: safeName,
+    slashCommands,
+    tools,
+    models,
+  });
 }
 
 function sleep(ms: number): Promise<void> {
@@ -642,6 +648,7 @@ async function streamToChannelCollecting(
   const charThreshold = 20;
   let truncated = false;
 
+  let lastTypingTime = Date.now();
   try {
     await channel.sendTyping(chatId, options.threadId);
   } catch {
@@ -650,6 +657,13 @@ async function streamToChannelCollecting(
 
   for await (const chunk of generator) {
     chunkCount++;
+
+    // Re-send typing indicator every 4 seconds (Telegram's expires after ~5s)
+    const now = Date.now();
+    if (now - lastTypingTime > 4000) {
+      channel.sendTyping(chatId, options.threadId).catch(() => {});
+      lastTypingTime = now;
+    }
 
     if (chunk.type === 'text') {
       fullText += chunk.content + '\n';
@@ -804,9 +818,13 @@ async function syncChronicleToTopics(
           const sessionInfo = `\n🔗 ${session.id}`;
           const lastMsg = session.lastMessage ? `\n\n💬 Last message:\n${session.lastMessage.slice(0, 300)}` : '';
           const resumeCmd = `\nResume: copilot --resume ${session.id}`;
-          await channel.send(chatId, `📚 Session imported from Copilot CLI${dirInfo}${timeInfo}${sessionInfo}\n\n${fullSummary.slice(0, 200)}${lastMsg}\n\n${resumeCmd}\n\nContinue this session by sending a message here.`, {
+          const welcomeMsg = await channel.send(chatId, `📚 Session imported from Copilot CLI${dirInfo}${timeInfo}${sessionInfo}\n\n${fullSummary.slice(0, 200)}${lastMsg}\n\n${resumeCmd}\n\nContinue this session by sending a message here.`, {
             threadId: thread.threadId,
           });
+          // Pin the welcome message (contains session ID)
+          if (channel.pinMessage) {
+            channel.pinMessage(chatId, welcomeMsg.id).catch(() => {});
+          }
         } catch (msgErr: any) {
           console.log(`⚠️ [Sync] Welcome message failed for ${session.id.slice(0, 8)}: ${msgErr.message}`);
           try {
