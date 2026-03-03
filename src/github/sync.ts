@@ -319,6 +319,8 @@ export async function startSyncLoop(
   let firstRun = true;
   let lastLeaderRefresh = 0;
   const LEADER_REFRESH_MS = 30_000; // Refresh leader.json every 30s (heartbeat for stale detection)
+  const STALE_HANDOFF_SENDER_MS = 60_000;  // Sender reclaims after 60s
+  const STALE_HANDOFF_OTHER_MS = 90_000;   // Other machines can pick up after 90s
   while (isRunning()) {
     try {
       // Pull first
@@ -334,6 +336,8 @@ export async function startSyncLoop(
       // Check for handoff requests
       const handoff = readHandoffRequest(repoPath);
       if (handoff) {
+        const handoffAge = Date.now() - new Date(handoff.requested_at).getTime();
+
         if (handoff.to_machine_id === config.machine.id) {
           // We're being asked to become leader
           console.log(`🔄 Handoff received from ${handoff.from_machine_name}: becoming leader`);
@@ -342,10 +346,25 @@ export async function startSyncLoop(
           await gitCommitAndPush(repoPath, `leader: ${config.machine.name} (handoff from ${handoff.from_machine_name})`);
           await onHandoff?.(handoff.pending_message);
         } else if (handoff.from_machine_id === config.machine.id) {
-          // We requested the handoff — yield
-          // (handoff file still present means target hasn't claimed yet, wait)
+          // We requested the handoff — target hasn't claimed yet
+          // If target is offline (didn't pick up in time), reclaim and process ourselves
+          if (handoffAge > STALE_HANDOFF_SENDER_MS) {
+            console.log(`⏰ Handoff to ${handoff.to_machine_name} timed out (${Math.floor(handoffAge / 1000)}s) — reclaiming`);
+            clearHandoffRequest(repoPath);
+            writeLeaderClaim(repoPath, config.machine.id, config.machine.name);
+            await gitCommitAndPush(repoPath, `leader: ${config.machine.name} (handoff timeout, target: ${handoff.to_machine_name})`);
+            await onHandoff?.(handoff.pending_message);
+          }
         } else {
-          // Handoff between other machines, ignore
+          // Handoff between other machines — if stale, we can recover
+          // Give the sender priority to reclaim first (they timeout at 60s, we at 90s)
+          if (handoffAge > STALE_HANDOFF_OTHER_MS) {
+            console.log(`⏰ Stale handoff ${handoff.from_machine_name} → ${handoff.to_machine_name} (${Math.floor(handoffAge / 1000)}s) — recovering`);
+            clearHandoffRequest(repoPath);
+            writeLeaderClaim(repoPath, config.machine.id, config.machine.name);
+            await gitCommitAndPush(repoPath, `leader: ${config.machine.name} (stale handoff recovery)`);
+            await onHandoff?.(handoff.pending_message);
+          }
         }
       }
 
