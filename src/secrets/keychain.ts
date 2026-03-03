@@ -7,6 +7,7 @@
  */
 
 import * as readline from 'readline';
+import { GH } from '../exec-paths';
 
 const SERVICE_NAME = 'ghclaw';
 const KEYCHAIN_TIMEOUT_MS = 60000; // 60 second timeout for keychain operations (dialog may appear)
@@ -69,7 +70,7 @@ export function isCodespace(): boolean {
  */
 export async function isGhAuthenticated(): Promise<boolean> {
   try {
-    const proc = Bun.spawn(['gh', 'auth', 'status'], { stdout: 'pipe', stderr: 'pipe' });
+    const proc = Bun.spawn([GH, 'auth', 'status'], { stdout: 'pipe', stderr: 'pipe' });
     return (await proc.exited) === 0;
   } catch {
     return false;

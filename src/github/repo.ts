@@ -6,6 +6,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { getGhToken } from './auth';
+import { GIT, GH } from '../exec-paths';
 
 // Simple async mutex to prevent concurrent git operations on the same repo.
 // The sync loop and handoff push both operate on the same working tree —
@@ -46,7 +47,7 @@ export async function checkRepoExists(username: string, repoName: string = '.ghc
   const env = cleanGhEnv();
 
   // Try gh repo view first
-  const proc = Bun.spawn(['gh', 'repo', 'view', `${username}/${repoName}`, '--json', 'name'], {
+  const proc = Bun.spawn([GH, 'repo', 'view', `${username}/${repoName}`, '--json', 'name'], {
     stdout: 'pipe',
     stderr: 'pipe',
     env,
@@ -56,7 +57,7 @@ export async function checkRepoExists(username: string, repoName: string = '.ghc
   const viewErr = (await new Response(proc.stderr).text()).trim();
 
   // Fallback: try REST API directly (handles tokens that can't use GraphQL)
-  const apiProc = Bun.spawn(['gh', 'api', `repos/${username}/${repoName}`, '--jq', '.name'], {
+  const apiProc = Bun.spawn([GH, 'api', `repos/${username}/${repoName}`, '--jq', '.name'], {
     stdout: 'pipe',
     stderr: 'pipe',
     env,
@@ -82,7 +83,7 @@ export async function createRepo(username: string, repoName: string = '.ghclaw')
   }
 
   const proc = Bun.spawn([
-    'gh', 'repo', 'create', `${username}/${repoName}`,
+    GH, 'repo', 'create', `${username}/${repoName}`,
     '--private',
     '--description', 'ghclaw cross-machine sync (auto-managed)',
   ], {
@@ -119,7 +120,7 @@ export async function cloneRepo(username: string, localPath: string, repoName: s
   }
 
   const proc = Bun.spawn([
-    'gh', 'repo', 'clone', `${username}/${repoName}`, localPath,
+    GH, 'repo', 'clone', `${username}/${repoName}`, localPath,
   ], {
     stdout: 'pipe',
     stderr: 'pipe',
@@ -146,7 +147,7 @@ export async function fixGitCredentialHelper(repoPath: string): Promise<void> {
   if (process.env.CODESPACES !== 'true') return;
 
   // Check if current remote uses github.com https
-  const proc = Bun.spawn(['git', 'remote', 'get-url', 'origin'], {
+  const proc = Bun.spawn([GIT, 'remote', 'get-url', 'origin'], {
     stdout: 'pipe',
     stderr: 'pipe',
     cwd: repoPath,
@@ -159,7 +160,7 @@ export async function fixGitCredentialHelper(repoPath: string): Promise<void> {
   if (remoteUrl.includes('x-access-token:')) return;
 
   // Get the proper user token via gh auth (with GITHUB_TOKEN cleared)
-  const tokenProc = Bun.spawn(['gh', 'auth', 'token'], {
+  const tokenProc = Bun.spawn([GH, 'auth', 'token'], {
     stdout: 'pipe',
     stderr: 'pipe',
     env: cleanGhEnv(),
@@ -172,7 +173,7 @@ export async function fixGitCredentialHelper(repoPath: string): Promise<void> {
   // Set remote URL with token embedded
   const repoPath_ = remoteUrl.replace('https://github.com/', '');
   const newUrl = `https://x-access-token:${token}@github.com/${repoPath_}`;
-  const setProc = Bun.spawn(['git', 'remote', 'set-url', 'origin', newUrl], {
+  const setProc = Bun.spawn([GIT, 'remote', 'set-url', 'origin', newUrl], {
     stdout: 'pipe',
     stderr: 'pipe',
     cwd: repoPath,
@@ -274,7 +275,7 @@ export async function setRepoSecrets(
 
     // Pipe secret via stdin to avoid exposing in process args (visible via ps)
     const proc = Bun.spawn([
-      'gh', 'secret', 'set', name,
+      GH, 'secret', 'set', name,
       '--repo', `${username}/${repoName}`,
     ], {
       stdin: 'pipe',
@@ -304,20 +305,20 @@ export async function gitPull(repoPath: string): Promise<boolean> {
     await fixGitCredentialHelper(repoPath);
 
     // Abort any stuck rebase first
-    const statusProc = Bun.spawn(['git', 'status'], {
+    const statusProc = Bun.spawn([GIT, 'status'], {
       stdout: 'pipe', stderr: 'pipe', cwd: repoPath,
     });
     await statusProc.exited;
     const statusOut = (await new Response(statusProc.stdout).text());
     if (statusOut.includes('rebase in progress') || statusOut.includes('rebasing')) {
-      Bun.spawn(['git', 'rebase', '--abort'], {
+      Bun.spawn([GIT, 'rebase', '--abort'], {
         stdout: 'pipe', stderr: 'pipe', cwd: repoPath, env: cleanGhEnv(),
       });
       await new Promise(r => setTimeout(r, 500));
     }
 
     // Use merge (not rebase) to avoid conflicts between concurrent machine syncs
-    const proc = Bun.spawn(['git', 'pull', '--no-rebase', '--quiet', '--strategy=recursive', '--strategy-option=theirs'], {
+    const proc = Bun.spawn([GIT, 'pull', '--no-rebase', '--quiet', '--strategy=recursive', '--strategy-option=theirs'], {
       stdout: 'pipe',
       stderr: 'pipe',
       cwd: repoPath,
@@ -337,7 +338,7 @@ export async function gitCommitAndPush(repoPath: string, message: string): Promi
     await fixGitCredentialHelper(repoPath);
 
     // Stage only known managed paths (avoid staging unexpected files)
-    const add = Bun.spawn(['git', 'add', 'memory/', '.github/workflows/', 'README.md'], {
+    const add = Bun.spawn([GIT, 'add', 'memory/', '.github/workflows/', 'README.md'], {
       stdout: 'pipe',
       stderr: 'pipe',
       cwd: repoPath,
@@ -346,7 +347,7 @@ export async function gitCommitAndPush(repoPath: string, message: string): Promi
     await add.exited;
 
     // Commit
-    const commit = Bun.spawn(['git', 'commit', '-m', message, '--quiet'], {
+    const commit = Bun.spawn([GIT, 'commit', '-m', message, '--quiet'], {
       stdout: 'pipe',
       stderr: 'pipe',
       cwd: repoPath,
@@ -356,7 +357,7 @@ export async function gitCommitAndPush(repoPath: string, message: string): Promi
     if (commitExit !== 0) return false;
 
     // Push
-    const push = Bun.spawn(['git', 'push', '--quiet'], {
+    const push = Bun.spawn([GIT, 'push', '--quiet'], {
       stdout: 'pipe',
       stderr: 'pipe',
       cwd: repoPath,
@@ -371,7 +372,7 @@ export async function gitCommitAndPush(repoPath: string, message: string): Promi
  * Check if there are uncommitted changes in the repo (no lock — safe for internal use)
  */
 async function hasChangesUnsafe(repoPath: string): Promise<boolean> {
-  const proc = Bun.spawn(['git', 'status', '--porcelain'], {
+  const proc = Bun.spawn([GIT, 'status', '--porcelain'], {
     stdout: 'pipe',
     stderr: 'pipe',
     cwd: repoPath,

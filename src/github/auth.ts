@@ -4,6 +4,8 @@
  * Replaces duplicated getGhToken() across session.ts, discovery.ts, daemon.ts, doctor.ts.
  */
 
+import { GH } from '../exec-paths';
+
 const REQUIRED_SCOPES = ['repo', 'workflow'];
 
 /**
@@ -11,7 +13,7 @@ const REQUIRED_SCOPES = ['repo', 'workflow'];
  */
 export async function getGhToken(): Promise<string | null> {
   try {
-    const proc = Bun.spawn(['gh', 'auth', 'token'], {
+    const proc = Bun.spawn([GH, 'auth', 'token'], {
       stdout: 'pipe',
       stderr: 'pipe',
     });
@@ -29,7 +31,7 @@ export async function getGhToken(): Promise<string | null> {
  */
 export async function getGhUsername(): Promise<string | null> {
   try {
-    const proc = Bun.spawn(['gh', 'api', 'user', '--jq', '.login'], {
+    const proc = Bun.spawn([GH, 'api', 'user', '--jq', '.login'], {
       stdout: 'pipe',
       stderr: 'pipe',
     });
@@ -47,7 +49,7 @@ export async function getGhUsername(): Promise<string | null> {
  */
 export async function getGhScopes(): Promise<string[]> {
   try {
-    const proc = Bun.spawn(['gh', 'auth', 'status'], {
+    const proc = Bun.spawn([GH, 'auth', 'status'], {
       stdout: 'pipe',
       stderr: 'pipe',
     });

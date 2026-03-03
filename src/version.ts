@@ -7,6 +7,7 @@
 
 import * as path from 'path';
 import * as fs from 'fs';
+import { GIT } from './exec-paths';
 
 const PROJECT_ROOT = path.resolve(import.meta.dir, '..');
 
@@ -23,7 +24,7 @@ export function getVersion(): string {
 /** Get the git commit hash (short) for the installed version */
 export function getCommitHash(): string {
   try {
-    const result = Bun.spawnSync(['git', 'rev-parse', '--short', 'HEAD'], {
+    const result = Bun.spawnSync([GIT, 'rev-parse', '--short', 'HEAD'], {
       cwd: PROJECT_ROOT,
       stdout: 'pipe',
       stderr: 'pipe',
@@ -45,7 +46,7 @@ export async function checkForUpdates(): Promise<{
 
   try {
     // Fetch remote without changing local state
-    Bun.spawnSync(['git', 'fetch', '--quiet', 'origin', 'main'], {
+    Bun.spawnSync([GIT, 'fetch', '--quiet', 'origin', 'main'], {
       cwd: PROJECT_ROOT,
       stdout: 'pipe',
       stderr: 'pipe',
@@ -53,7 +54,7 @@ export async function checkForUpdates(): Promise<{
 
     // Count commits behind
     const behindResult = Bun.spawnSync(
-      ['git', 'rev-list', '--count', 'HEAD..origin/main'],
+      [GIT, 'rev-list', '--count', 'HEAD..origin/main'],
       { cwd: PROJECT_ROOT, stdout: 'pipe', stderr: 'pipe' }
     );
     const behindBy = parseInt(behindResult.stdout.toString().trim()) || 0;
@@ -62,7 +63,7 @@ export async function checkForUpdates(): Promise<{
     let latest: string | null = null;
     if (behindBy > 0) {
       const remoteVersionResult = Bun.spawnSync(
-        ['git', 'show', 'origin/main:package.json'],
+        [GIT, 'show', 'origin/main:package.json'],
         { cwd: PROJECT_ROOT, stdout: 'pipe', stderr: 'pipe' }
       );
       try {

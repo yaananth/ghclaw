@@ -15,6 +15,8 @@
  * - Output captured (not inherited)
  */
 
+import { GH } from '../exec-paths';
+
 /** Allowed gh-aw subcommands */
 const ALLOWED_SUBCOMMANDS = new Set(['init', 'new', 'compile', 'run', 'list', '--help']);
 
@@ -78,7 +80,7 @@ export async function ghAwRun(repoPath: string, name: string): Promise<boolean> 
  * List existing agentic workflows
  */
 export async function ghAwList(repoPath: string): Promise<string> {
-  const proc = Bun.spawn(['gh', 'aw', 'list'], {
+  const proc = Bun.spawn([GH, 'aw', 'list'], {
     cwd: repoPath,
     stdout: 'pipe',
     stderr: 'pipe',
@@ -102,7 +104,7 @@ export async function ghAwList(repoPath: string): Promise<string> {
  */
 export async function isGhAwInstalled(): Promise<boolean> {
   try {
-    const proc = Bun.spawn(['gh', 'aw', '--help'], {
+    const proc = Bun.spawn([GH, 'aw', '--help'], {
       stdout: 'pipe',
       stderr: 'pipe',
     });
@@ -166,7 +168,7 @@ async function runGhAw(repoPath: string, args: string[]): Promise<boolean> {
     validateSubcommand(args[0]);
   }
 
-  const proc = Bun.spawn(['gh', 'aw', ...args], {
+  const proc = Bun.spawn([GH, 'aw', ...args], {
     cwd: repoPath,
     stdout: 'pipe',
     stderr: 'pipe',
