@@ -464,18 +464,19 @@ async function checkGithubIntegration(autoFix = false): Promise<DiagnosticResult
         const pushStderr = (await new Response(pushProc.stderr).text()).trim();
         // "rejected" means auth works but repo is out of sync — not an auth error
         const isAuthError = pushExit !== 0 && !pushStderr.includes('rejected') && !pushStderr.includes('fetch first');
+        const pushCmd = `git push --dry-run (cwd: ${config.github.repoPath})`;
         results.push({
           name: 'GitHub Push Access',
           status: pushExit === 0 || !isAuthError ? 'ok' : 'error',
-          message: pushExit === 0 ? 'Push access verified' : isAuthError ? 'Cannot push to sync repo' : 'Push access verified (repo needs sync)',
-          fix: isAuthError ? 'Check gh auth: gh auth refresh -s repo,workflow' : undefined,
+          message: pushExit === 0 ? 'Push access verified' : isAuthError ? `Cannot push to sync repo` : 'Push access verified (repo needs sync)',
+          fix: isAuthError ? `${pushStderr || 'unknown error'} (ran: ${pushCmd})` : undefined,
         });
-      } catch {
+      } catch (err: any) {
         results.push({
           name: 'GitHub Push Access',
           status: 'error',
-          message: 'Could not verify push access',
-          fix: 'Check git remote: cd ~/.ghclaw/repo && git remote -v',
+          message: `Could not verify push access: ${err?.message || err}`,
+          fix: `Check git remote: cd ${config.github.repoPath} && git remote -v`,
         });
       }
     }
