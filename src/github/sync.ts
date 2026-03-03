@@ -276,13 +276,11 @@ export async function startSyncLoop(
       // Pull first
       await gitPull(repoPath);
 
-      // On first run, claim leadership after pull (so working tree is clean)
+      // On first run, always claim leadership (write our identity to leader.json)
+      // If another machine is actually polling, we'll get 409 and yield via the polling loop
       if (firstRun) {
         firstRun = false;
-        const existingLeader = readLeaderClaim(repoPath);
-        if (!existingLeader || existingLeader.machine_id === config.machine.id) {
-          writeLeaderClaim(repoPath, config.machine.id, config.machine.name);
-        }
+        writeLeaderClaim(repoPath, config.machine.id, config.machine.name);
       }
 
       // Check for handoff requests
@@ -303,11 +301,12 @@ export async function startSyncLoop(
         }
       }
 
-      // Check leader claim — if another machine claimed leadership, yield
-      const leader = readLeaderClaim(repoPath);
-      if (leader && leader.machine_id !== config.machine.id) {
-        onYield?.();
-      }
+      // Note: we do NOT yield based on leader.json here.
+      // leader.json can be stale from a previous run of another machine.
+      // The ONLY reasons to yield are:
+      //   1. Telegram 409 (another instance is actually polling right now)
+      //   2. Explicit handoff request (this machine wrote handoff.json and is waiting)
+      // leader.json is used for handoff targeting only, not for yield decisions.
 
       // Export local data (only writes files if data actually changed)
       const allSessions = getActiveSessions(100);
