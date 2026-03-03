@@ -271,6 +271,9 @@ export async function startSyncLoop(
   console.log(`🔄 Starting GitHub sync (every ${config.github.syncIntervalMs / 1000}s)...`);
 
   let firstRun = true;
+  let lastHeartbeatPush = 0; // Track when we last pushed a heartbeat
+  const HEARTBEAT_INTERVAL_MS = 25_000; // Push heartbeat every 25s
+  const STALE_THRESHOLD_MS = 60_000; // Consider leader dead after 60s without heartbeat
   while (isRunning()) {
     try {
       // Pull first
@@ -303,11 +306,33 @@ export async function startSyncLoop(
         }
       }
 
-      // Check leader claim — if another machine claimed leadership, yield
+      // Leader heartbeat: refresh claimed_at so followers know we're alive
       const leader = readLeaderClaim(repoPath);
-      if (leader && leader.machine_id !== config.machine.id) {
-        // Another machine is leader — if we were polling, yield
-        onYield?.();
+      const weAreLeader = leader && leader.machine_id === config.machine.id;
+      if (weAreLeader) {
+        writeLeaderClaim(repoPath, config.machine.id, config.machine.name);
+      }
+
+      // Check leader claim — if another machine is leader
+      if (leader && !weAreLeader) {
+        // Stale leader detection: if leader hasn't refreshed in STALE_THRESHOLD_MS, take over
+        const claimedAt = new Date(leader.claimed_at).getTime();
+        const isStale = Date.now() - claimedAt > STALE_THRESHOLD_MS;
+
+        if (isStale) {
+          console.log(`👑 Leader ${leader.machine_name} appears dead (last heartbeat ${Math.floor((Date.now() - claimedAt) / 1000)}s ago) — taking over`);
+          writeLeaderClaim(repoPath, config.machine.id, config.machine.name);
+          // Also clear any stale handoff requests from the dead leader
+          const staleHandoff = readHandoffRequest(repoPath);
+          if (staleHandoff && staleHandoff.from_machine_id === leader.machine_id) {
+            clearHandoffRequest(repoPath);
+          }
+          await gitCommitAndPush(repoPath, `leader: ${config.machine.name} (stale takeover from ${leader.machine_name})`);
+          await onHandoff?.();
+        } else {
+          // Leader is alive — yield
+          onYield?.();
+        }
       }
 
       // Export local data (only writes files if data actually changed)
@@ -318,10 +343,13 @@ export async function startSyncLoop(
       const machineChanged = exportMachineInfo(repoPath, config.machine.id, config.machine.name, machineSessions);
 
       // Only commit+push if something meaningful changed (avoids hammering on every cycle)
-      if ((sessionsChanged || machineChanged) && await hasChanges(repoPath)) {
+      // Also push heartbeat (leader.json) periodically so followers know we're alive
+      const needsHeartbeat = weAreLeader && (Date.now() - lastHeartbeatPush > HEARTBEAT_INTERVAL_MS);
+      if ((sessionsChanged || machineChanged || needsHeartbeat) && await hasChanges(repoPath)) {
         const pushed = await gitCommitAndPush(repoPath, `sync: ${config.machine.name} @ ${new Date().toISOString()}`);
         if (pushed) {
           syncState.syncCount++;
+          if (weAreLeader) lastHeartbeatPush = Date.now();
         }
       }
 
