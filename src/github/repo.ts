@@ -11,12 +11,21 @@ import { getGhToken } from './auth';
  * Check if the sync repo exists on GitHub
  */
 export async function checkRepoExists(username: string, repoName: string = '.ghclaw'): Promise<boolean> {
+  // Try gh repo view first
   const proc = Bun.spawn(['gh', 'repo', 'view', `${username}/${repoName}`, '--json', 'name'], {
     stdout: 'pipe',
     stderr: 'pipe',
   });
   const exitCode = await proc.exited;
-  return exitCode === 0;
+  if (exitCode === 0) return true;
+
+  // Fallback: try REST API directly (handles tokens that can't use GraphQL)
+  const apiProc = Bun.spawn(['gh', 'api', `repos/${username}/${repoName}`, '--jq', '.name'], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+  const apiExit = await apiProc.exited;
+  return apiExit === 0;
 }
 
 /**

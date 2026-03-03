@@ -23,11 +23,13 @@ import { isChronicleAvailable, getRecentSessions } from '../copilot/chronicle';
 import { checkGhAuth, getGhUsername, getGhToken, getGhScopes } from '../github/auth';
 import { checkRepoExists, createRepo, cloneRepo, initRepoStructure, setRepoSecrets } from '../github/repo';
 import { detectConfiguredChannels } from '../channels/registry';
+import { getVersion } from '../version';
 
 export async function runSetup(): Promise<void> {
+  const version = getVersion();
   console.log(`
 ╔══════════════════════════════════════════════════════════════╗
-║                     GHClaw Setup                           ║
+║                  GHClaw Setup v${version.padEnd(40 - 18, ' ')}║
 ║         Local Telegram Bot powered by Copilot CLI            ║
 ╚══════════════════════════════════════════════════════════════╝
 `);
