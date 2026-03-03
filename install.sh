@@ -90,12 +90,16 @@ else
   mkdir -p "$BIN_DIR"
 fi
 
+# Remove any existing symlink (e.g., from bun link) to avoid overwriting the linked target
+[ -L "$BIN_DIR/ghclaw" ] && rm "$BIN_DIR/ghclaw"
 echo "$LAUNCHER_CONTENT" > "$BIN_DIR/ghclaw"
 chmod +x "$BIN_DIR/ghclaw"
 
 # Also place in ~/.local/bin and ~/.bun/bin as fallbacks
 for EXTRA_DIR in "$HOME/.local/bin" "${BUN_INSTALL:-$HOME/.bun}/bin"; do
   if [ -d "$EXTRA_DIR" ] && [ "$EXTRA_DIR" != "$BIN_DIR" ]; then
+    # Remove any existing symlink to avoid overwriting the linked target
+    [ -L "$EXTRA_DIR/ghclaw" ] && rm "$EXTRA_DIR/ghclaw" 2>/dev/null || true
     echo "$LAUNCHER_CONTENT" > "$EXTRA_DIR/ghclaw" 2>/dev/null || true
     chmod +x "$EXTRA_DIR/ghclaw" 2>/dev/null || true
   fi
