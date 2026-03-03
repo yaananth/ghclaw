@@ -52,9 +52,13 @@ if [ -d "$INSTALL_DIR/.git" ]; then
   git -C "$INSTALL_DIR" rebase --abort 2>/dev/null || true
   git -C "$INSTALL_DIR" merge --abort 2>/dev/null || true
   # Drop any local changes — install dir is managed by the installer, not the user
-  git -C "$INSTALL_DIR" reset --hard --quiet
-  git -C "$INSTALL_DIR" clean -fd --quiet
-  git -C "$INSTALL_DIR" pull --rebase --quiet
+  git -C "$INSTALL_DIR" reset --hard --quiet 2>/dev/null || true
+  git -C "$INSTALL_DIR" clean -fd --quiet 2>/dev/null || true
+  if ! git -C "$INSTALL_DIR" pull --rebase --quiet 2>/dev/null; then
+    echo "⚠️  Update failed, re-cloning..."
+    rm -rf "$INSTALL_DIR"
+    git clone --quiet "$REPO" "$INSTALL_DIR"
+  fi
 else
   echo ""
   echo "📥 Cloning ghclaw..."
