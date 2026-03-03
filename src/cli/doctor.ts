@@ -3,7 +3,7 @@
  * Validates all dependencies, auth, security, and configuration
  */
 
-import { getConfigAsync, clearConfigCache } from '../config';
+import { getConfigAsync, clearConfigCache, getConfigDir } from '../config';
 import { getSecret, listSecrets, isKeychainAvailable } from '../secrets/keychain';
 import { TelegramClient } from '../telegram/client';
 import { getSecuritySetupInstructions } from '../telegram/security';
@@ -312,29 +312,38 @@ async function checkSecurityConfig(): Promise<DiagnosticResult[]> {
 
 async function checkDataDirectory(autoFix: boolean): Promise<DiagnosticResult> {
   const fs = require('fs');
-  const dataDir = `${process.cwd()}/data`;
+  const dataDir = require('path').join(getConfigDir(), 'data');
 
   if (fs.existsSync(dataDir)) {
     return {
       name: 'Data Directory',
       status: 'ok',
-      message: './data exists',
+      message: `${dataDir} exists`,
     };
   }
 
   if (autoFix) {
-    fs.mkdirSync(dataDir, { recursive: true });
-    return {
-      name: 'Data Directory',
-      status: 'ok',
-      message: './data created (auto-fixed)',
-    };
+    try {
+      fs.mkdirSync(dataDir, { recursive: true });
+      return {
+        name: 'Data Directory',
+        status: 'ok',
+        message: `${dataDir} created (auto-fixed)`,
+      };
+    } catch (err: any) {
+      return {
+        name: 'Data Directory',
+        status: 'error',
+        message: `Could not create ${dataDir}: ${err.message}`,
+        fix: `Run: mkdir -p ${dataDir}`,
+      };
+    }
   }
 
   return {
     name: 'Data Directory',
     status: 'warn',
-    message: './data does not exist',
+    message: `${dataDir} does not exist`,
     fix: 'Will be created on first run',
     autoFixable: true,
   };
