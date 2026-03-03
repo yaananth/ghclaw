@@ -105,7 +105,7 @@ The daemon:
 - `.github/workflows/sched-*.yml` — persistent schedule workflows
 - `.github/workflows/notify.yml` — base notification workflow (channel-aware)
 
-Sync loop runs every 5 seconds: `git pull → export → commit/push if changed`.
+Sync loop runs every 5 seconds: `git pull → export (if changed) → commit/push (if changed)`. Smart sync compares session data before writing — no needless commits when data hasn't changed.
 
 ### 3. Copilot Coding Agent (Enterprise API)
 
@@ -217,10 +217,12 @@ A **Channel Registry** (`src/channels/registry.ts`) auto-detects configured chan
 
 ```
 Every 5 seconds:
-  1. git pull --rebase (get changes from other machines)
-  2. Export local sessions to memory/sessions.json
-  3. Export machine info to memory/machines/{id}.json
-  4. git add -A && git commit && git push (if changes)
+  1. git pull --no-rebase (merge with strategy-option=theirs)
+     └─ Auto-aborts stuck rebases before pulling
+  2. Check leader claim + handoff requests
+  3. Export local sessions to memory/sessions.json (skipped if data unchanged)
+  4. Export machine info to memory/machines/{id}.json (skipped if data unchanged)
+  5. git commit && push (only if files were actually written)
 ```
 
 ### Reminder Flow
@@ -307,7 +309,7 @@ src/
 ├── daemon.ts             # Main daemon (Channel interface, polling, processing, action execution)
 └── cli/
     ├── setup.ts          # Interactive setup wizard (channel detection + gh-aw init)
-    └── doctor.ts         # Health checks
+    └── doctor.ts         # Health checks + git auto-fix (detached HEAD, stuck rebase, diverged branches)
 ```
 
 ## Multi-Machine Support
@@ -354,7 +356,11 @@ The target machine's sync loop detects the handoff file, claims leadership (writ
 
 ### Automatic Failover
 
-If the leader goes offline (crashes, sleeps, network loss), followers detect stale leadership during their sync loop. The first follower to successfully claim `memory/leader.json` and push becomes the new leader and begins polling.
+If the leader goes offline (crashes, sleeps, network loss), followers detect this lazily. Every ~30 seconds, a follower attempts a short poll probe:
+- **Poll succeeds (no 409):** Leader is dead → follower claims leadership, resumes polling, processes any messages received
+- **Poll gets 409 Conflict:** Leader is alive → stay as follower
+
+No heartbeat commits or timestamp-based detection needed — Telegram's 409 Conflict response IS the heartbeat.
 
 ### Fallback (No Sync Repo)
 

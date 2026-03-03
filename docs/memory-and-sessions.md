@@ -42,7 +42,7 @@ ghclaw has a deliberate three-tier memory architecture: a thin local mapping lay
 │  │  memory/handoff.json          (pending handoff message)      │  │
 │  │  .github/workflows/           (reminders + schedules)        │  │
 │  └─────────────────────────────────────────────────────────────┘  │
-│  Synced every 5 seconds via git pull/push                          │
+│  Synced via smart sync (only when data changes)                      │
 └───────────────────────────────────────────────────────────────────┘
 ```
 
@@ -124,13 +124,15 @@ ghclaw reads Chronicle to:
 
 ```
 Every 5 seconds (configurable):
-  1. git pull --rebase (get changes from other machines)
-  2. Export local sessions → memory/sessions.json
-  3. Export machine info → memory/machines/{machine-id}.json
-  4. git add -A && git commit && git push (if changes)
+  1. git pull --no-rebase (merge, strategy-option=theirs)
+     └─ Auto-aborts stuck rebases before pulling
+  2. Check leader claim + handoff requests
+  3. Compare session data with existing files
+  4. Export sessions/machine info ONLY if data changed
+  5. git commit && push ONLY if files were written
 ```
 
-Errors are logged but never crash the daemon. The sync loop is non-blocking.
+Smart sync: `exportSessionsToJson` and `exportMachineInfo` compare meaningful session data (excluding volatile timestamps like `exportedAt`) against existing files. If nothing changed, no write occurs, and no commit/push is triggered. This prevents hundreds of empty sync commits when the daemon is idle.
 
 ### What Does NOT Get Synced
 
@@ -179,7 +181,7 @@ The system prompt instructs the LLM to pick the right model:
 When the daemon starts, a background loop syncs Chronicle sessions to channel threads:
 
 ```
-Every 30 seconds:
+Every 10 seconds:
   1. Get the 5 most recent Chronicle sessions (by recency, not time window)
   2. Filter: only multi-turn interactive sessions
   3. Filter: skip ghclaw's own bot sessions
@@ -248,6 +250,14 @@ Message arrives at Leader machine
 ```
 
 If no sync repo is configured, cross-machine handoff is unavailable. The leader claims the session locally and processes it.
+
+### Automatic Failover
+
+If the leader goes offline, followers detect this lazily via poll probes every ~30 seconds:
+- **Poll succeeds (no 409):** Leader is dead → follower claims leadership and resumes polling
+- **Poll gets 409 Conflict:** Leader is still alive → stay as follower
+
+No heartbeat commits needed — Telegram's 409 response IS the liveness signal.
 
 ## Streaming
 
