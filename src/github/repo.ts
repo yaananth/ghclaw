@@ -23,6 +23,11 @@ export async function checkRepoExists(username: string, repoName: string = '.ghc
  * Create the private sync repo on GitHub
  */
 export async function createRepo(username: string, repoName: string = '.ghclaw'): Promise<boolean> {
+  // Double-check it doesn't already exist (avoid unnecessary create attempts)
+  if (await checkRepoExists(username, repoName)) {
+    return true;
+  }
+
   const proc = Bun.spawn([
     'gh', 'repo', 'create', `${username}/${repoName}`,
     '--private',
@@ -34,6 +39,10 @@ export async function createRepo(username: string, repoName: string = '.ghclaw')
   const exitCode = await proc.exited;
   if (exitCode !== 0) {
     const stderr = await new Response(proc.stderr).text();
+    // If create failed, check if it actually exists (Codespace tokens may lack create permission)
+    if (await checkRepoExists(username, repoName)) {
+      return true;
+    }
     console.error(`Failed to create repo: ${stderr}`);
   }
   return exitCode === 0;
