@@ -36,6 +36,13 @@ export interface ChronicleCheckpoint {
   created_at: string;
 }
 
+export interface ChronicleMessagePair {
+  turnNumber: number;
+  userMessage: string;
+  assistantMessage: string;
+  timestamp?: string;
+}
+
 // ============================================================================
 // Session State Directory Access
 // ============================================================================
@@ -311,6 +318,89 @@ export function getLatestCheckpoint(sessionId: string): ChronicleCheckpoint | nu
     };
   } catch {
     return null;
+  }
+}
+
+// ============================================================================
+// Incremental Message Reading
+// ============================================================================
+
+/**
+ * Fast turn count: count user.message lines in events.jsonl without full JSON parse
+ */
+export function getSessionTurnCount(sessionId: string): number {
+  const eventsPath = path.join(getSessionStateDir(), sessionId, 'events.jsonl');
+  try {
+    if (!fs.existsSync(eventsPath)) return 0;
+    const content = fs.readFileSync(eventsPath, 'utf-8');
+    let count = 0;
+    for (const line of content.split('\n')) {
+      if (line.includes('"user.message"')) count++;
+    }
+    return count;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Read message pairs (user + assistant) after a given turn number.
+ * Returns only complete pairs where both user and assistant messages exist.
+ */
+export function getMessagesAfterTurn(sessionId: string, afterTurn: number, maxTurns: number = 5): ChronicleMessagePair[] {
+  const eventsPath = path.join(getSessionStateDir(), sessionId, 'events.jsonl');
+  try {
+    if (!fs.existsSync(eventsPath)) return [];
+    const content = fs.readFileSync(eventsPath, 'utf-8');
+    const lines = content.split('\n');
+
+    const pairs: ChronicleMessagePair[] = [];
+    let turnNumber = 0;
+    let currentUserMessage: string | null = null;
+    let currentTimestamp: string | undefined;
+
+    for (const line of lines) {
+      if (!line.trim()) continue;
+
+      if (line.includes('"user.message"')) {
+        turnNumber++;
+        if (turnNumber <= afterTurn) {
+          currentUserMessage = null;
+          continue;
+        }
+        if (pairs.length >= maxTurns) break;
+        try {
+          const event = JSON.parse(line);
+          const rawContent = event.data?.content as string || '';
+          // Extract user's actual message (after "User: " prefix if present)
+          const userLineMatch = rawContent.match(/\nUser: (.+?)$/s);
+          currentUserMessage = userLineMatch ? userLineMatch[1].trim() : rawContent.split('\n').pop()?.trim() || rawContent;
+          currentTimestamp = event.timestamp;
+        } catch {
+          currentUserMessage = null;
+        }
+      } else if (line.includes('"assistant.message"') && currentUserMessage) {
+        try {
+          const event = JSON.parse(line);
+          const assistantContent = (event.data?.content as string) || '';
+          if (assistantContent.trim()) {
+            pairs.push({
+              turnNumber,
+              userMessage: currentUserMessage,
+              assistantMessage: assistantContent,
+              timestamp: currentTimestamp,
+            });
+            currentUserMessage = null;
+          }
+        } catch {
+          // Skip malformed lines
+        }
+      }
+    }
+
+    return pairs;
+  } catch {
+    return [];
   }
 }
 

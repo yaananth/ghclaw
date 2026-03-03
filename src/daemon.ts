@@ -27,6 +27,8 @@ import {
   claimSession,
   getSyncedSessionIds,
   addSyncedSessionId,
+  getSyncedTurnCount,
+  updateSyncedTurnCount,
 } from './memory/session-mapper';
 import {
   handleCommand,
@@ -34,10 +36,11 @@ import {
   setPendingSessions,
   type CommandResult,
 } from './telegram/commands';
-import { isChronicleAvailable, getChronicleStats, getRecentSessions as getChronicleRecentSessions } from './copilot/chronicle';
+import { isChronicleAvailable, getChronicleStats, getRecentSessions as getChronicleRecentSessions, getSessionTurnCount, getMessagesAfterTurn, type ChronicleMessagePair } from './copilot/chronicle';
 import { parseActionBlocks, executeAction } from './actions';
 import { getGhToken } from './github/auth';
-import { startSyncLoop, writeLeaderClaim, writeHandoffRequest, readLeaderClaim, lookupSessionOwner } from './github/sync';
+import { startSyncLoop, writeLeaderClaim, writeHandoffRequest, readLeaderClaim, removeLeaderClaim, lookupSessionOwner } from './github/sync';
+import { gitCommitAndPush } from './github/repo';
 import { getVersion, getCommitHash } from './version';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -248,6 +251,20 @@ async function main() {
   const shutdown = async () => {
     console.log('\n\n🛑 Shutting down gracefully...');
     isRunning = false;
+
+    // Remove leader claim so other machines can take over immediately
+    if (isLeader && config.github.enabled && config.github.syncEnabled) {
+      try {
+        const repoPath = config.github.repoPath;
+        if (removeLeaderClaim(repoPath)) {
+          await gitCommitAndPush(repoPath, `leader: ${config.machine.name} stepped down (shutdown)`);
+          console.log('👑 Leader claim removed');
+        }
+      } catch (err) {
+        console.warn(`⚠️ Could not remove leader claim: ${err}`);
+      }
+    }
+
     await channel.stop();
     // Remove lock file
     try {
@@ -992,6 +1009,80 @@ function formatShortTimestamp(dateStr: string): string {
 // ============================================================================
 
 /**
+ * Format a turn pair for channel display.
+ * Strips json:ghclaw-action blocks and caps at Telegram's 4096 limit.
+ */
+function formatTurnForChannel(pair: ChronicleMessagePair): string {
+  const userMsg = pair.userMessage.slice(0, 500);
+
+  // Strip json:ghclaw-action blocks from assistant response
+  let assistantMsg = pair.assistantMessage;
+  assistantMsg = assistantMsg.replace(/```json:ghclaw-action[\s\S]*?```/g, '').trim();
+  assistantMsg = assistantMsg.slice(0, 3000);
+
+  const formatted = `💬 ${userMsg}\n\n🤖 ${assistantMsg}`;
+  return formatted.slice(0, 4096);
+}
+
+/**
+ * Sync incremental messages for existing Chronicle topics.
+ * Checks each synced session for new turns and posts them to the topic.
+ * Rate limits: max 6 messages per cycle, max 3 per session, 300ms between sends.
+ */
+async function syncIncrementalMessages(
+  channel: Channel,
+  chatId: string,
+  chatIdNum: number
+): Promise<void> {
+  const sessionsWithTopics = getSessionsWithTopics(chatIdNum);
+  if (sessionsWithTopics.length === 0) return;
+
+  let totalSent = 0;
+  const maxPerCycle = 6;
+
+  for (const session of sessionsWithTopics) {
+    if (totalSent >= maxPerCycle) break;
+
+    const syncedCount = getSyncedTurnCount(session.id);
+    const currentCount = getSessionTurnCount(session.id);
+
+    if (currentCount <= syncedCount) continue;
+
+    const maxPerSession = Math.min(3, maxPerCycle - totalSent);
+    const newPairs = getMessagesAfterTurn(session.id, syncedCount, maxPerSession);
+
+    if (newPairs.length === 0) {
+      // Turn count increased but no complete pairs yet — update anyway to avoid re-checking
+      updateSyncedTurnCount(session.id, currentCount);
+      continue;
+    }
+
+    let highestPosted = syncedCount;
+    for (const pair of newPairs) {
+      if (totalSent >= maxPerCycle) break;
+
+      const formatted = formatTurnForChannel(pair);
+      try {
+        await channel.send(chatId, formatted, {
+          threadId: session.topic_id?.toString(),
+        });
+        highestPosted = pair.turnNumber;
+        totalSent++;
+        await sleep(300);
+      } catch (err) {
+        console.log(`⚠️ [Sync] Failed to send turn ${pair.turnNumber} for ${session.id.slice(0, 8)}: ${err}`);
+        break;
+      }
+    }
+
+    if (highestPosted > syncedCount) {
+      updateSyncedTurnCount(session.id, highestPosted);
+      console.log(`📨 [Sync] Posted ${highestPosted - syncedCount} turn(s) to topic for ${session.id.slice(0, 8)}`);
+    }
+  }
+}
+
+/**
  * Sync Chronicle sessions to channel topics/threads
  * Uses getRecentSessions (top 5 by recency) instead of time-based active sessions.
  * Synced session IDs are persisted in SQLite to survive daemon restarts.
@@ -1033,6 +1124,10 @@ async function syncChronicleToTopics(
 
       // Persist as synced (before attempting — prevents retry loops)
       addSyncedSessionId(session.id);
+
+      // Set synced_turn_count to current count so existing turns aren't re-posted
+      const currentTurnCount = getSessionTurnCount(session.id);
+      updateSyncedTurnCount(session.id, currentTurnCount);
 
       try {
         const ts = formatShortTimestamp(session.updated_at);
@@ -1086,6 +1181,9 @@ async function syncChronicleToTopics(
     if (createdCount > 0) {
       console.log(`📌 [Sync] Created ${createdCount} new topic(s)`);
     }
+
+    // Sync incremental messages for existing topics
+    await syncIncrementalMessages(channel, chatId, chatIdNum);
   } catch (err) {
     console.log(`⚠️ [Sync] Chronicle sync error: ${err}`);
   }

@@ -132,6 +132,13 @@ export function initDatabase(): Database {
     );
   `);
 
+  // Migration: add synced_turn_count column for incremental Chronicle sync
+  try {
+    db.exec('ALTER TABLE synced_chronicle_sessions ADD COLUMN synced_turn_count INTEGER DEFAULT 0');
+  } catch {
+    // Column already exists
+  }
+
   return db;
 }
 
@@ -405,4 +412,21 @@ export function getSyncedSessionIds(): Set<string> {
 export function addSyncedSessionId(sessionId: string): void {
   const db = initDatabase();
   db.prepare('INSERT OR IGNORE INTO synced_chronicle_sessions (session_id) VALUES (?)').run(sessionId);
+}
+
+/**
+ * Get the number of turns already synced for a Chronicle session
+ */
+export function getSyncedTurnCount(sessionId: string): number {
+  const db = initDatabase();
+  const row = db.prepare('SELECT synced_turn_count FROM synced_chronicle_sessions WHERE session_id = ?').get(sessionId) as { synced_turn_count: number } | undefined;
+  return row?.synced_turn_count ?? 0;
+}
+
+/**
+ * Update the synced turn count for a Chronicle session
+ */
+export function updateSyncedTurnCount(sessionId: string, count: number): void {
+  const db = initDatabase();
+  db.prepare('UPDATE synced_chronicle_sessions SET synced_turn_count = ?, synced_at = datetime(\'now\') WHERE session_id = ?').run(count, sessionId);
 }
