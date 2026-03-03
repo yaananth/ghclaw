@@ -369,65 +369,37 @@ async function main() {
   // Main polling loop
   // - On start: isLeader=true, start polling
   // - 409: become follower
-  // - Follower probe succeeds: only claim if leader.json is stale or missing
-  //   (NOT if leader.json says us — we may have written it before yielding)
+  // - Follower: checks leader.json staleness (NO Telegram API calls — probing causes 409)
   // - Handoff: handled by onHandoff callback in sync loop (sets isLeader directly)
-  let followerProbeCount = 0;
-  const probeIntervalCycles = 6 + Math.floor(Math.random() * 4); // 30-50s jitter
-  const STALE_LEADER_MS = 120_000; // Consider leader dead after 2min without update
+  const STALE_LEADER_MS = 120_000; // Consider leader dead after 2min without heartbeat
 
   while (isRunning) {
     if (!isLeader) {
-      followerProbeCount++;
-      if (followerProbeCount < probeIntervalCycles) {
-        await sleep(5000);
-        continue;
-      }
-      followerProbeCount = 0;
+      // Follower mode: check leader.json staleness every 10s.
+      // NO Telegram poll — calling getUpdates as a follower triggers 409 for the real leader.
+      // The sync loop pulls leader.json (refreshed by leader's heartbeat every 30s).
+      // If stale >2min, the leader is dead — claim leadership.
+      // Handoffs are handled directly by onHandoff callback (sets isLeader=true).
+      await sleep(10_000);
 
-      // Probe: try to poll — only claim if leader is stale or absent
-      try {
-        const messages = await channel.poll(1);
-
-        // Poll succeeded (no 409). Check leader.json before claiming.
-        if (config.github.enabled && config.github.syncEnabled) {
-          const leader = readLeaderClaim(config.github.repoPath);
-          if (leader) {
-            // leader.json exists. Only claim if it's stale (leader is dead).
-            // Don't claim just because it says us — we may have written it before yielding.
-            // Handoffs set isLeader directly via onHandoff callback, not here.
-            const claimedAt = new Date(leader.claimed_at).getTime();
-            if (Date.now() - claimedAt > STALE_LEADER_MS) {
-              console.log(`👑 Leader ${leader.machine_name} stale (${Math.floor((Date.now() - claimedAt) / 1000)}s) — taking over`);
-              writeLeaderClaim(config.github.repoPath, config.machine.id, config.machine.name);
-              isLeader = true;
-            }
-            // Otherwise: leader.json is recent — stay follower
-          } else {
-            // No leader.json at all — claim
-            console.log('👑 No leader.json — claiming leadership');
+      if (config.github.enabled && config.github.syncEnabled) {
+        const leader = readLeaderClaim(config.github.repoPath);
+        if (leader) {
+          const claimedAt = new Date(leader.claimed_at).getTime();
+          if (Date.now() - claimedAt > STALE_LEADER_MS) {
+            console.log(`👑 Leader ${leader.machine_name} stale (${Math.floor((Date.now() - claimedAt) / 1000)}s) — taking over`);
             writeLeaderClaim(config.github.repoPath, config.machine.id, config.machine.name);
             isLeader = true;
           }
         } else {
-          // No sync repo — just claim on any successful poll
+          // No leader.json at all — claim
+          console.log('👑 No leader.json — claiming leadership');
+          writeLeaderClaim(config.github.repoPath, config.machine.id, config.machine.name);
           isLeader = true;
         }
-
-        if (isLeader) {
-          // Process any messages from the probe
-          for (const message of messages) {
-            await processMessage(channel, channelConfig.type, message, security, config);
-          }
-        }
-      } catch (error) {
-        const errMsg = String(error);
-        if (errMsg.includes('Conflict') || errMsg.includes('409') || errMsg.includes('terminated by other')) {
-          // Leader is actively polling — stay follower
-        } else {
-          console.log(`⚠️ Follower probe error: ${errMsg.slice(0, 100)}`);
-        }
       }
+      // No sync repo and not leader — nothing to do, just wait
+      // (single-machine mode: shouldn't get here unless transient 409)
       continue;
     }
 
@@ -443,7 +415,6 @@ async function main() {
         // Another instance is polling — yield (don't touch leader.json, it's theirs)
         console.log('⚠️  Another instance is polling. Yielding to follower mode...');
         isLeader = false;
-        followerProbeCount = 0;
       } else {
         console.error('❌ Polling error:', error);
         await sleep(config.telegram.pollIntervalMs * 5);
