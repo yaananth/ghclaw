@@ -60,12 +60,9 @@ echo "📦 Installing dependencies..."
 (cd "$INSTALL_DIR" && bun install --silent)
 
 # 6. Create launcher script
-# Resolve bun's absolute path so the launcher works even if ~/.bun/bin isn't in PATH
-BUN_PATH="$(command -v bun)"
-LAUNCHER_CONTENT="#!/usr/bin/env bash
-GHCLAW_DIR=\"\${GHCLAW_INSTALL_DIR:-\$HOME/.ghclaw-src}\"
-BUN=\"\$(command -v bun 2>/dev/null || echo \"$BUN_PATH\")\"
-exec \"\$BUN\" run \"\$GHCLAW_DIR/bin/ghclaw.ts\" \"\$@\""
+# Use $HOME-relative paths so it works regardless of PATH configuration
+LAUNCHER_CONTENT='#!/usr/bin/env bash
+exec "$HOME/.bun/bin/bun" run "${GHCLAW_INSTALL_DIR:-$HOME/.ghclaw-src}/bin/ghclaw.ts" "$@"'
 
 BIN_DIR=""
 # Try /usr/local/bin first (always in PATH, writable in containers/Codespaces)
