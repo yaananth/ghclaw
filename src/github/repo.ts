@@ -18,6 +18,7 @@ export async function checkRepoExists(username: string, repoName: string = '.ghc
   });
   const exitCode = await proc.exited;
   if (exitCode === 0) return true;
+  const viewErr = (await new Response(proc.stderr).text()).trim();
 
   // Fallback: try REST API directly (handles tokens that can't use GraphQL)
   const apiProc = Bun.spawn(['gh', 'api', `repos/${username}/${repoName}`, '--jq', '.name'], {
@@ -25,7 +26,14 @@ export async function checkRepoExists(username: string, repoName: string = '.ghc
     stderr: 'pipe',
   });
   const apiExit = await apiProc.exited;
-  return apiExit === 0;
+  if (apiExit === 0) return true;
+  const apiErr = (await new Response(apiProc.stderr).text()).trim();
+
+  // Log errors for debugging
+  if (viewErr || apiErr) {
+    console.log(`   (repo check: view=${viewErr || 'exit ' + exitCode}, api=${apiErr || 'exit ' + apiExit})`);
+  }
+  return false;
 }
 
 /**
