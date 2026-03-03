@@ -499,45 +499,60 @@ export async function runSetup(): Promise<void> {
 
     const configDir = getConfigDir();
 
-    // Ask for repo org/location (default to username)
-    const { repoOrg } = await inquirer.prompt([{
-      type: 'input',
-      name: 'repoOrg',
-      message: 'GitHub org/user for sync repo:',
-      default: username,
-      validate: (input: string) => input.trim().length > 0 || 'Required',
-    }]);
+    // Auto-detect existing .ghclaw repo before asking
+    let targetOrg = username;
+    let targetRepo = '.ghclaw';
 
-    const { repoName } = await inquirer.prompt([{
-      type: 'input',
-      name: 'repoName',
-      message: 'Repository name:',
-      default: '.ghclaw',
-      validate: (input: string) => input.trim().length > 0 || 'Required',
-    }]);
-
-    const targetOrg = repoOrg.trim();
-    const targetRepo = repoName.trim();
-    const repoPath = path.join(configDir, 'repo');
-
-    // Check/create repo
     console.log(`\n🔍 Checking for ${targetOrg}/${targetRepo}...`);
-    const exists = await checkRepoExists(targetOrg, targetRepo);
+    let exists = await checkRepoExists(targetOrg, targetRepo);
 
-    if (!exists) {
-      console.log(`   Creating private repo ${targetOrg}/${targetRepo}...`);
-      const created = await createRepo(targetOrg, targetRepo);
-      if (!created) {
-        console.log('   ❌ Failed to create repo. GitHub features will be disabled.\n');
-      } else {
-        console.log('   ✅ Repo created');
-      }
+    if (exists) {
+      console.log(`   ✅ Found existing repo: ${targetOrg}/${targetRepo}`);
     } else {
-      console.log('   ✅ Repo exists');
+      // Not found — ask user for org/repo
+      console.log(`   Not found. Configure manually:\n`);
+
+      const { repoOrg } = await inquirer.prompt([{
+        type: 'input',
+        name: 'repoOrg',
+        message: 'GitHub org/user for sync repo:',
+        default: username,
+        validate: (input: string) => input.trim().length > 0 || 'Required',
+      }]);
+
+      const { repoName } = await inquirer.prompt([{
+        type: 'input',
+        name: 'repoName',
+        message: 'Repository name:',
+        default: '.ghclaw',
+        validate: (input: string) => input.trim().length > 0 || 'Required',
+      }]);
+
+      targetOrg = repoOrg.trim();
+      targetRepo = repoName.trim();
+
+      // Re-check with user-provided values
+      if (targetOrg !== username || targetRepo !== '.ghclaw') {
+        exists = await checkRepoExists(targetOrg, targetRepo);
+      }
+
+      if (!exists) {
+        console.log(`   Creating private repo ${targetOrg}/${targetRepo}...`);
+        const created = await createRepo(targetOrg, targetRepo);
+        if (created) {
+          console.log('   ✅ Repo created');
+          exists = true;
+        } else {
+          console.log('   ❌ Failed to create repo. GitHub features will be disabled.\n');
+        }
+      } else {
+        console.log(`   ✅ Repo exists`);
+      }
     }
 
-    // Clone
-    if (exists || await checkRepoExists(targetOrg, targetRepo)) {
+    const repoPath = path.join(configDir, 'repo');
+
+    if (exists) {
       console.log(`   Cloning to ${repoPath}...`);
       try {
         await cloneRepo(targetOrg, repoPath, targetRepo);
