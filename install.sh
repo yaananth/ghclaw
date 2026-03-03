@@ -48,6 +48,9 @@ fi
 if [ -d "$INSTALL_DIR/.git" ]; then
   echo ""
   echo "🔄 Updating ghclaw..."
+  # Abort any in-progress rebase/merge from a previous failed install
+  git -C "$INSTALL_DIR" rebase --abort 2>/dev/null || true
+  git -C "$INSTALL_DIR" merge --abort 2>/dev/null || true
   # Drop any local changes — install dir is managed by the installer, not the user
   git -C "$INSTALL_DIR" reset --hard --quiet
   git -C "$INSTALL_DIR" clean -fd --quiet
