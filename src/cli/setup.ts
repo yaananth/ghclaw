@@ -428,19 +428,29 @@ export async function runSetup(): Promise<void> {
           console.log(`✅ Auth: ${auth.username} (scopes: ${auth.scopes.join(', ')})`);
         }
 
-        // Verify push access
+        // Verify push access (pull first to avoid "fetch first" false positive)
         console.log('🔍 Verifying push access...');
+        const csEnv = process.env.CODESPACES === 'true'
+          ? Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'GITHUB_TOKEN') as [string, string][])
+          : undefined;
+        const pullProc = Bun.spawn(['git', 'pull', '--rebase', '--quiet'], {
+          cwd: existingConfig.github.repoPath,
+          stdout: 'pipe', stderr: 'pipe',
+          env: csEnv,
+        });
+        await pullProc.exited;
         const pushProc = Bun.spawn(['git', 'push', '--dry-run'], {
           cwd: existingConfig.github.repoPath,
           stdout: 'pipe', stderr: 'pipe',
-          ...(process.env.CODESPACES === 'true' ? { env: Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'GITHUB_TOKEN') as [string, string][]) } : {}),
+          env: csEnv,
         });
         const pushExit = await pushProc.exited;
-        if (pushExit === 0) {
+        const pushErr = (await new Response(pushProc.stderr).text()).trim();
+        const isAuthError = pushExit !== 0 && !pushErr.includes('rejected') && !pushErr.includes('fetch first');
+        if (pushExit === 0 || !isAuthError) {
           console.log('✅ Push access verified');
         } else {
-          const pushErr = await new Response(pushProc.stderr).text();
-          console.log(`❌ Push failed: ${pushErr.trim()}`);
+          console.log(`❌ Push failed: ${pushErr}`);
           console.log('   Fix: gh auth refresh -s repo,workflow');
         }
       }
@@ -626,20 +636,25 @@ export async function runSetup(): Promise<void> {
           console.log(`   ⚠️  Failed to set: ${secretResult.failed.join(', ')}`);
         }
 
-        // Verify push access
+        // Verify push access (pull first to avoid "fetch first" false positive)
         console.log('   Verifying push access...');
+        const pushEnv = process.env.CODESPACES === 'true'
+          ? Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'GITHUB_TOKEN') as [string, string][])
+          : undefined;
+        const pullFirst = Bun.spawn(['git', 'pull', '--rebase', '--quiet'], {
+          cwd: repoPath, stdout: 'pipe', stderr: 'pipe', env: pushEnv,
+        });
+        await pullFirst.exited;
         const pushProc = Bun.spawn(['git', 'push', '--dry-run'], {
-          cwd: repoPath,
-          stdout: 'pipe',
-          stderr: 'pipe',
-          env: process.env.CODESPACES === 'true' ? Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'GITHUB_TOKEN') as [string, string][]) : undefined,
+          cwd: repoPath, stdout: 'pipe', stderr: 'pipe', env: pushEnv,
         });
         const pushExit = await pushProc.exited;
-        if (pushExit === 0) {
+        const pushErr = (await new Response(pushProc.stderr).text()).trim();
+        const pushAuthErr = pushExit !== 0 && !pushErr.includes('rejected') && !pushErr.includes('fetch first');
+        if (pushExit === 0 || !pushAuthErr) {
           console.log('   ✅ Push access verified');
         } else {
-          const pushErr = await new Response(pushProc.stderr).text();
-          console.log(`   ⚠️  Push access failed: ${pushErr.trim()}`);
+          console.log(`   ⚠️  Push access failed: ${pushErr}`);
           console.log('   Fix: gh auth refresh -s repo,workflow');
         }
 
