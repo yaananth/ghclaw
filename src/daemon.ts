@@ -329,39 +329,60 @@ async function main() {
   }
 
   // Main polling loop
-  let followerRetryCount = 0;
+  let followerProbeCount = 0;  // Counts cycles since last probe
+  let consecutiveProbeSuccesses = 0;  // Must succeed 2x in a row to claim leadership
+  let bufferedMessages: ChannelMessage[] = [];  // Messages from first probe success (held until confirmed)
   while (isRunning) {
     if (!isLeader) {
-      // Follower mode: periodically try to poll to detect dead leader
-      // Wait longer between retries (30s) so we're not hammering
-      followerRetryCount++;
-      if (followerRetryCount < 6) {
-        // First 30s: just wait for handoff via sync loop
+      // Follower mode: periodically probe to detect dead leader
+      followerProbeCount++;
+      if (followerProbeCount < 6) {
+        // Wait ~30s between probes (6 × 5s)
         await sleep(5000);
         continue;
       }
-      // Every 30s: try to poll — if leader is dead we'll succeed and claim leadership
-      followerRetryCount = 0;
+      followerProbeCount = 0;
+
+      // Probe: try to poll with very short timeout
       try {
-        const messages = await channel.poll(1); // Short timeout (1s) — just testing
-        // No 409 → old leader is gone, we're the new leader
-        console.log('👑 Leader appears gone (poll succeeded) — claiming leadership');
-        isLeader = true;
-        // Claim in sync repo too
-        if (config.github.enabled && config.github.syncEnabled) {
-          writeLeaderClaim(config.github.repoPath, config.machine.id, config.machine.name);
+        const messages = await channel.poll(1); // 1s timeout — just testing
+        // Empty poll can succeed during leader's gap between calls — doesn't count
+        if (messages.length === 0) {
+          // Don't count empty polls as evidence of dead leader
+          continue;
         }
-        // Process any messages we got from the probe
-        for (const message of messages) {
-          await processMessage(channel, channelConfig.type, message, security, config);
+
+        consecutiveProbeSuccesses++;
+
+        if (consecutiveProbeSuccesses >= 2) {
+          // Two consecutive non-empty successes = leader is truly gone
+          console.log('👑 Leader confirmed gone (2 consecutive probes succeeded) — claiming leadership');
+          isLeader = true;
+          consecutiveProbeSuccesses = 0;
+          if (config.github.enabled && config.github.syncEnabled) {
+            writeLeaderClaim(config.github.repoPath, config.machine.id, config.machine.name);
+          }
+          // Process buffered messages from first probe + current messages
+          const allMessages = [...bufferedMessages, ...messages];
+          bufferedMessages = [];
+          for (const message of allMessages) {
+            await processMessage(channel, channelConfig.type, message, security, config);
+          }
+        } else {
+          console.log(`🔍 Follower probe succeeded (1/2, ${messages.length} msg) — will confirm on next probe`);
+          // Buffer messages from first success — process them if we confirm on next probe
+          bufferedMessages = messages;
         }
       } catch (error) {
         const errMsg = String(error);
         if (errMsg.includes('Conflict') || errMsg.includes('409') || errMsg.includes('terminated by other')) {
-          // Leader is still alive — stay as follower
+          // Leader is alive — reset
+          consecutiveProbeSuccesses = 0;
+          bufferedMessages = [];
         } else {
-          // Some other error (network, etc.) — stay as follower, don't spam
           console.log(`⚠️ Follower probe error: ${errMsg.slice(0, 100)}`);
+          consecutiveProbeSuccesses = 0;
+          bufferedMessages = [];
         }
       }
       continue;
@@ -371,7 +392,8 @@ async function main() {
       const messages = await channel.poll(config.telegram.pollTimeoutSeconds);
 
       for (const message of messages) {
-        if (!isLeader) break; // Stop processing batch if we yielded during handoff
+        // Note: we finish processing the entire batch even if isLeader flips mid-batch
+        // (yield takes effect after the batch, not mid-message)
         await processMessage(channel, channelConfig.type, message, security, config);
       }
     } catch (error) {
@@ -380,7 +402,9 @@ async function main() {
         // Another instance is polling — yield leadership
         console.log('⚠️  Another instance is polling this bot. Yielding to follower mode...');
         isLeader = false;
-        followerRetryCount = 0;
+        followerProbeCount = 0;
+        consecutiveProbeSuccesses = 0;
+        bufferedMessages = [];
       } else {
         console.error('❌ Polling error:', error);
         await sleep(config.telegram.pollIntervalMs * 5);
