@@ -188,6 +188,22 @@ async function main() {
     console.log('\n🧠 Sessions: Fresh start');
   }
 
+  // Pull sync repo before polling so we have fresh machine files for ownership checks.
+  // Without this, the first message could arrive before the sync loop's first pull,
+  // causing lookupSessionOwner to miss other machines' sessions.
+  if (config.github.enabled && config.github.syncEnabled) {
+    const repoPath = config.github.repoPath;
+    if (fs.existsSync(path.join(repoPath, '.git'))) {
+      try {
+        const { gitPull } = await import('./github/repo');
+        await gitPull(repoPath);
+        console.log('\n🔄 Sync repo pulled (fresh machine data)');
+      } catch (err) {
+        console.log(`\n⚠️ Sync repo pull failed: ${err}`);
+      }
+    }
+  }
+
   console.log('\n📡 Starting polling loop...');
   console.log('__DAEMON_READY__'); // Marker for `ghclaw start` to detect readiness
   isRunning = true;
