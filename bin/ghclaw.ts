@@ -505,32 +505,44 @@ program
       console.log('\n⚠️  Health check found errors. Run: ghclaw doctor --fix');
     }
 
-    // Restart daemon if running
+    // (Re)start daemon
     const lockFile = `${getConfigDir()}/daemon.lock`;
+    let daemonRunning = false;
     if (fs.existsSync(lockFile)) {
       const pid = parseInt(fs.readFileSync(lockFile, 'utf-8').trim());
       if (!isNaN(pid) && pid > 0) {
-        console.log('\n🔄 Restarting daemon...');
-        try {
-          process.kill(pid, 'SIGTERM');
-          for (let i = 0; i < 20; i++) {
-            await new Promise(r => setTimeout(r, 500));
-            try { process.kill(pid, 0); } catch { break; }
-          }
-          try { process.kill(pid, 0); process.kill(pid, 'SIGKILL'); } catch {}
-        } catch {}
-        if (fs.existsSync(lockFile)) fs.unlinkSync(lockFile);
-
-        const logFile = `${getConfigDir()}/daemon.log`;
-        const out = fs.openSync(logFile, 'a');
-        const err = fs.openSync(logFile, 'a');
-        const child = spawn(process.execPath, [process.argv[1], 'start', '--foreground'], {
-          detached: true,
-          stdio: ['ignore', out, err],
-        });
-        child.unref();
-        console.log(`✅ Daemon restarted (PID ${child.pid})`);
+        try { process.kill(pid, 0); daemonRunning = true; } catch {}
       }
+    }
+
+    if (daemonRunning) {
+      const pid = parseInt(fs.readFileSync(lockFile, 'utf-8').trim());
+      console.log('\n🔄 Restarting daemon...');
+      try {
+        process.kill(pid, 'SIGTERM');
+        for (let i = 0; i < 20; i++) {
+          await new Promise(r => setTimeout(r, 500));
+          try { process.kill(pid, 0); } catch { break; }
+        }
+        try { process.kill(pid, 0); process.kill(pid, 'SIGKILL'); } catch {}
+      } catch {}
+      if (fs.existsSync(lockFile)) fs.unlinkSync(lockFile);
+    }
+
+    // Start daemon (fresh or restart)
+    if (doctorOk) {
+      console.log(daemonRunning ? '' : '\n🚀 Starting daemon...');
+      const logFile = `${getConfigDir()}/daemon.log`;
+      const out = fs.openSync(logFile, 'a');
+      const err = fs.openSync(logFile, 'a');
+      const child = spawn(process.execPath, [process.argv[1], 'start', '--foreground'], {
+        detached: true,
+        stdio: ['ignore', out, err],
+      });
+      child.unref();
+      console.log(`✅ Daemon ${daemonRunning ? 'restarted' : 'started'} (PID ${child.pid})`);
+    } else {
+      console.log('\n⚠️  Skipping daemon start — fix health check errors first');
     }
 
     console.log(`\n✅ Upgrade complete! v${beforeVersion} → v${getVersion()}`);
