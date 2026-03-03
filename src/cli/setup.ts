@@ -458,9 +458,13 @@ export async function runSetup(): Promise<void> {
     console.log('  - Session persistence\n');
 
   // Auto-detect gh CLI auth
-  // In Codespaces, GITHUB_TOKEN is auto-set with limited scopes and blocks gh auth refresh.
-  // We need to detect this and work around it.
+  // In Codespaces, GITHUB_TOKEN is auto-set with limited scopes.
+  // gh CLI API calls (repo view, api) prefer GITHUB_TOKEN over stored auth,
+  // so we must clear it upfront to use the proper user auth.
   const hasGithubTokenEnv = !!process.env.GITHUB_TOKEN;
+  if (hasGithubTokenEnv) {
+    process.env.GITHUB_TOKEN = '';
+  }
 
   console.log('🔍 Checking GitHub CLI auth...');
   const auth = await checkGhAuth();
@@ -484,34 +488,17 @@ export async function runSetup(): Promise<void> {
   }
 
   if (auth.authenticated && auth.missingScopes.length > 0) {
+    console.log(`⚠️  Missing scopes: ${auth.missingScopes.join(', ')}`);
     if (hasGithubTokenEnv) {
-      // GITHUB_TOKEN env var overrides gh CLI auth — temporarily unset and re-auth
-      console.log(`⚠️  Missing scopes: ${auth.missingScopes.join(', ')}`);
-      console.log('   GITHUB_TOKEN env var detected (Codespaces) — unsetting to authenticate properly...\n');
-      // Set to empty string (not delete) — Bun child processes still see deleted vars
-      process.env.GITHUB_TOKEN = '';
-
-      // Check if there's already a proper gh auth behind the env var
-      const behindAuth = await checkGhAuth();
-      if (behindAuth.authenticated && behindAuth.missingScopes.length === 0) {
-        console.log('   ✅ Found existing gh auth with proper scopes');
-        Object.assign(auth, behindAuth);
-      } else {
-        // Need to login fresh
-        console.log('   Running: gh auth login\n');
-        const loginProc = Bun.spawn(['gh', 'auth', 'login', '-s', 'repo,workflow'], {
-          stdin: 'inherit',
-          stdout: 'inherit',
-          stderr: 'inherit',
-        });
-        await loginProc.exited;
-        const recheck = await checkGhAuth();
-        Object.assign(auth, recheck);
-      }
-
-      // Keep GITHUB_TOKEN empty for the rest of setup so gh uses proper auth
+      // GITHUB_TOKEN was already cleared upfront — just need to login
+      console.log('   Running: gh auth login\n');
+      const loginProc = Bun.spawn(['gh', 'auth', 'login', '-s', 'repo,workflow'], {
+        stdin: 'inherit',
+        stdout: 'inherit',
+        stderr: 'inherit',
+      });
+      await loginProc.exited;
     } else {
-      console.log(`⚠️  Missing scopes: ${auth.missingScopes.join(', ')}`);
       console.log('   Refreshing auth scopes...\n');
       const refreshProc = Bun.spawn(['gh', 'auth', 'refresh', '-s', 'repo,workflow'], {
         stdin: 'inherit',
@@ -519,9 +506,9 @@ export async function runSetup(): Promise<void> {
         stderr: 'inherit',
       });
       await refreshProc.exited;
-      const recheck = await checkGhAuth();
-      Object.assign(auth, recheck);
     }
+    const recheck = await checkGhAuth();
+    Object.assign(auth, recheck);
   }
 
   if (auth.authenticated) {
