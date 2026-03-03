@@ -262,8 +262,15 @@ async function main() {
         await processMessage(channel, channelConfig.type, message, security, config);
       }
     } catch (error) {
-      console.error('❌ Polling error:', error);
-      await sleep(config.telegram.pollIntervalMs * 5);
+      const errMsg = String(error);
+      if (errMsg.includes('Conflict') || errMsg.includes('409') || errMsg.includes('terminated by other')) {
+        // Another instance is polling this bot — back off as follower
+        console.log('⚠️  Another instance is polling this bot. Waiting as follower (sync-only)...');
+        await sleep(30000); // 30s backoff before retrying
+      } else {
+        console.error('❌ Polling error:', error);
+        await sleep(config.telegram.pollIntervalMs * 5);
+      }
     }
   }
 
