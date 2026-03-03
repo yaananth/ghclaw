@@ -485,10 +485,14 @@ program
       console.log('⚠️  Link failed:', link.stderr?.toString().trim());
     }
 
-    // Run health check (with auto-fix so upgrade resolves issues like missing GH_PAT)
+    // Run health check in a fresh process (so it uses the newly-pulled code)
     console.log('\n🩺 Running health check...');
-    const report = await runDoctor(true);
-    console.log(formatDoctorReport(report));
+    const doctorProc = Bun.spawnSync([process.execPath, process.argv[1], 'doctor', '--fix'], {
+      stdout: 'inherit',
+      stderr: 'inherit',
+      stdin: 'inherit',
+    });
+    const doctorOk = doctorProc.exitCode === 0;
 
     // If config is incomplete, prompt setup
     if (!isConfigComplete()) {
@@ -497,7 +501,7 @@ program
       return; // setup handles daemon start
     }
 
-    if (report.errors > 0) {
+    if (!doctorOk) {
       console.log('\n⚠️  Health check found errors. Run: ghclaw doctor --fix');
     }
 

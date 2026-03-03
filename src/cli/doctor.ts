@@ -493,7 +493,7 @@ async function checkGithubIntegration(autoFix = false): Promise<DiagnosticResult
           name: 'GitHub GH_PAT Secret',
           status: 'warn',
           message: 'Could not list repo secrets (auth or permission issue)',
-          fix: 'Run: gh auth refresh -s repo,workflow',
+          fix: `Run: gh auth refresh -s repo,workflow (ran: gh secret list -R ${config.github.username}/${config.github.repoName})`,
         });
       } else {
         // Match exact secret name at start of line (gh secret list outputs "NAME\tUPDATED" per line)
