@@ -72,7 +72,8 @@ export class TelegramClient {
     const data = await response.json() as { ok: boolean; result: TelegramUpdate[] };
 
     if (!data.ok) {
-      throw new Error('Failed to get updates');
+      const desc = (data as any).description || 'unknown error';
+      throw new Error(`Failed to get updates: ${desc}`);
     }
 
     // Update offset
