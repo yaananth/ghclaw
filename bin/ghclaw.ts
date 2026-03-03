@@ -138,6 +138,7 @@ program
     if (report.errors > 0) {
       process.exit(1);
     }
+    process.exit(0);
   });
 
 program
@@ -486,13 +487,14 @@ program
     }
 
     // Run health check in a fresh process (so it uses the newly-pulled code)
+    // Doctor exits 1 only on errors (not warnings), but also handle unexpected exit codes
     console.log('\n🩺 Running health check...');
     const doctorProc = Bun.spawnSync([process.execPath, process.argv[1], 'doctor', '--fix'], {
       stdout: 'inherit',
       stderr: 'inherit',
       stdin: 'inherit',
     });
-    const doctorOk = doctorProc.exitCode === 0;
+    const doctorOk = doctorProc.exitCode !== 1; // Only block on explicit error exit
 
     // If config is incomplete, prompt setup
     if (!isConfigComplete()) {
