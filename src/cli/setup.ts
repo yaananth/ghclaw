@@ -39,10 +39,12 @@ export async function runSetup(): Promise<void> {
   console.log(`Secrets: ${storageBackend}${!nativeKeychain ? ' (no OS keychain)' : ''}\n`);
 
   if (!nativeKeychain && isCodespace()) {
+    const repoName = process.env.GITHUB_REPOSITORY || '';
+    const reposFlag = repoName ? ` --repos ${repoName}` : '';
     console.log('  Running in Codespace — secrets stored in env vars for this session.');
     console.log('  For persistence across rebuilds, set Codespace secrets:');
-    console.log('    gh secret set TELEGRAM_BOT_TOKEN --user');
-    console.log('    gh secret set TELEGRAM_ALLOWED_GROUP_ID --user\n');
+    console.log(`    gh secret set TELEGRAM_BOT_TOKEN --user${reposFlag}`);
+    console.log(`    gh secret set TELEGRAM_ALLOWED_GROUP_ID --user${reposFlag}\n`);
   } else if (!nativeKeychain) {
     console.log('  No OS keychain available. Secrets stored in env vars for this session.');
     console.log('  For persistence, export env vars in your shell profile.\n');

@@ -421,8 +421,8 @@ secret-tool lookup service ghclaw account telegram-bot-token
 
 ## In Codespaces (no keychain):
 # Set Codespace secrets (encrypted at rest, injected as env vars):
-gh secret set TELEGRAM_BOT_TOKEN --user
-gh secret set TELEGRAM_ALLOWED_GROUP_ID --user
+gh secret set TELEGRAM_BOT_TOKEN --user --repos OWNER/REPO
+gh secret set TELEGRAM_ALLOWED_GROUP_ID --user --repos OWNER/REPO
 `,
     windows: `
 # Windows Credential Manager
