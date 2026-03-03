@@ -881,11 +881,11 @@ async function startChronicleSync(
   chatId: string,
   config: Config
 ): Promise<void> {
-  console.log('🔄 Starting Chronicle sync (every 30s)...');
+  console.log('🔄 Starting Chronicle sync (every 10s)...');
 
   while (isRunning) {
     await syncChronicleToTopics(channel, chatId, config);
-    await sleep(30000); // Check every 30 seconds
+    await sleep(10000); // Check every 10 seconds
   }
 }
 
