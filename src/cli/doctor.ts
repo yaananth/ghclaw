@@ -433,6 +433,15 @@ async function checkGithubIntegration(autoFix = false): Promise<DiagnosticResult
     if (cloneExists) {
       try {
         await fixGitCredentialHelper(config.github.repoPath);
+        // Pull first to avoid "rejected: fetch first" false positive
+        const pullProc = Bun.spawn(['git', 'pull', '--rebase', '--quiet'], {
+          cwd: config.github.repoPath,
+          stdout: 'pipe',
+          stderr: 'pipe',
+          env: Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'GITHUB_TOKEN') as [string, string][]),
+        });
+        await pullProc.exited;
+
         const pushProc = Bun.spawn(['git', 'push', '--dry-run'], {
           cwd: config.github.repoPath,
           stdout: 'pipe',
@@ -440,11 +449,14 @@ async function checkGithubIntegration(autoFix = false): Promise<DiagnosticResult
           env: Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'GITHUB_TOKEN') as [string, string][]),
         });
         const pushExit = await pushProc.exited;
+        const pushStderr = (await new Response(pushProc.stderr).text()).trim();
+        // "rejected" means auth works but repo is out of sync — not an auth error
+        const isAuthError = pushExit !== 0 && !pushStderr.includes('rejected') && !pushStderr.includes('fetch first');
         results.push({
           name: 'GitHub Push Access',
-          status: pushExit === 0 ? 'ok' : 'error',
-          message: pushExit === 0 ? 'Push access verified' : 'Cannot push to sync repo',
-          fix: pushExit !== 0 ? 'Check gh auth: gh auth refresh -s repo,workflow' : undefined,
+          status: pushExit === 0 || !isAuthError ? 'ok' : 'error',
+          message: pushExit === 0 ? 'Push access verified' : isAuthError ? 'Cannot push to sync repo' : 'Push access verified (repo needs sync)',
+          fix: isAuthError ? 'Check gh auth: gh auth refresh -s repo,workflow' : undefined,
         });
       } catch {
         results.push({
