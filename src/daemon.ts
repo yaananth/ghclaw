@@ -299,9 +299,16 @@ async function main() {
             isThreaded: !!pendingMessage.thread_id && pendingMessage.thread_id !== '0',
           };
           const chatInfo = channel.getChatInfo ? await channel.getChatInfo(msg.chatId).catch(() => null) : null;
+          // Claim session locally so it's ours, and skip ownership check —
+          // this message was explicitly routed to us via handoff
+          const hChatId = parseInt(pendingMessage.chat_id) || 0;
+          const hThreadId = parseInt(pendingMessage.thread_id) || 0;
+          const hSession = getOrCreateSession(hChatId, hThreadId, undefined, config.machine.id, config.machine.name);
+          claimSession(hSession.id, config.machine.id, config.machine.name);
           processMessageInner(
             channel, msg, sanitizedText, security, config,
-            msg.chatId, msg.threadId || '0', chatInfo?.isForum ?? false
+            msg.chatId, msg.threadId || '0', chatInfo?.isForum ?? false,
+            true // skipOwnershipCheck — handoff was explicitly directed to us
           ).catch(err => {
             console.error(`❌ Failed to process handed-off message: ${err}`);
           });
@@ -463,7 +470,8 @@ async function processMessageInner(
   config: Config,
   chatId: string,
   threadId: string,
-  isForum: boolean
+  isForum: boolean,
+  skipOwnershipCheck: boolean = false
 ): Promise<void> {
   const user = message.sender;
   const chatIdNum = parseInt(chatId) || 0;
@@ -572,15 +580,18 @@ async function processMessageInner(
     // When a topic was created by another machine (e.g., Codespace), our local DB won't have it,
     // so getOrCreateSession creates a new row with OUR machine_id. Check the shared sync repo
     // (sessions.json) for the real owner before deciding whether to handoff.
+    // SKIP for handoff-received messages — they were explicitly routed to us.
     let effectiveMachineId = session.machine_id;
     let effectiveMachineName = session.machine_name;
-    if (config.github.enabled && config.github.syncEnabled) {
+    if (!skipOwnershipCheck && config.github.enabled && config.github.syncEnabled) {
       if (!effectiveMachineId || effectiveMachineId === config.machine.id) {
         const repoOwner = lookupSessionOwner(config.github.repoPath, chatIdNum, threadIdNum, config.machine.id);
         if (repoOwner && repoOwner.machine_id !== config.machine.id) {
           effectiveMachineId = repoOwner.machine_id;
           effectiveMachineName = repoOwner.machine_name;
-          console.log(`🔍 [${sessionName}] Sync repo says owner is ${effectiveMachineName} (${effectiveMachineId.slice(0, 8)}), not us`);
+          // Correct local SQLite so future lookups are right and machine file exports are accurate
+          claimSession(session.id, repoOwner.machine_id, repoOwner.machine_name);
+          console.log(`🔍 [${sessionName}] Sync repo says owner is ${effectiveMachineName} (${effectiveMachineId.slice(0, 8)}) — corrected local DB`);
         }
       }
     }
