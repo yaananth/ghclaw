@@ -59,25 +59,52 @@ fi
 echo "📦 Installing dependencies..."
 (cd "$INSTALL_DIR" && bun install --silent)
 
-# 6. Link binary
-echo "🔗 Linking ghclaw command..."
-(cd "$INSTALL_DIR" && bun link --silent 2>/dev/null || bun link 2>/dev/null)
+# 6. Create launcher script and symlink
+# Use a shell wrapper instead of bun link (which is unreliable for global installs)
+BIN_DIR="$HOME/.local/bin"
+mkdir -p "$BIN_DIR"
 
-# 7. Verify
+cat > "$BIN_DIR/ghclaw" << 'LAUNCHER'
+#!/usr/bin/env bash
+GHCLAW_DIR="${GHCLAW_INSTALL_DIR:-$HOME/.ghclaw-src}"
+exec bun run "$GHCLAW_DIR/bin/ghclaw.ts" "$@"
+LAUNCHER
+chmod +x "$BIN_DIR/ghclaw"
+
+# Also symlink to ~/.bun/bin in case that's in PATH but ~/.local/bin isn't
+BUN_BIN="${BUN_INSTALL:-$HOME/.bun}/bin"
+if [ -d "$BUN_BIN" ] && [ "$BUN_BIN" != "$BIN_DIR" ]; then
+  ln -sf "$BIN_DIR/ghclaw" "$BUN_BIN/ghclaw" 2>/dev/null || true
+fi
+
+# 7. Verify and guide PATH setup
+echo ""
 if command -v ghclaw &>/dev/null; then
-  echo ""
   echo "  ✅ ghclaw installed!"
   echo ""
   echo "  Next: ghclaw setup"
-  echo ""
 else
-  # bun link might need PATH update
+  # Detect which shell config to update
+  SHELL_RC=""
+  if [ -f "$HOME/.bashrc" ]; then
+    SHELL_RC="$HOME/.bashrc"
+  elif [ -f "$HOME/.zshrc" ]; then
+    SHELL_RC="$HOME/.zshrc"
+  elif [ -f "$HOME/.profile" ]; then
+    SHELL_RC="$HOME/.profile"
+  fi
+
+  # Auto-add to PATH if not already there
+  if [ -n "$SHELL_RC" ] && ! grep -q '\.local/bin' "$SHELL_RC" 2>/dev/null; then
+    echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$SHELL_RC"
+    echo "  Added ~/.local/bin to PATH in $SHELL_RC"
+  fi
+
+  echo "  ✅ ghclaw installed!"
   echo ""
-  echo "  ✅ ghclaw installed to $INSTALL_DIR"
+  echo "  Run this to start using it now:"
+  echo "    export PATH=\"\$HOME/.local/bin:\$PATH\""
   echo ""
-  echo "  Add to PATH if needed:"
-  echo "    export PATH=\"\$HOME/.bun/bin:\$PATH\""
-  echo ""
-  echo "  Then run: ghclaw setup"
-  echo ""
+  echo "  Then: ghclaw setup"
 fi
+echo ""
