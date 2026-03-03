@@ -467,7 +467,7 @@ program
 
     // Install deps
     console.log('\n📥 Installing dependencies...');
-    const install = spawnSync('bun', ['install'], {
+    const install = spawnSync(process.execPath, ['install'], {
       cwd: projectDir,
       stdio: 'inherit',
     });
@@ -478,7 +478,7 @@ program
 
     // Re-link binary (suppress output — it's just a re-registration)
     console.log('\n🔗 Linking binary...');
-    const link = spawnSync('bun', ['link'], { cwd: projectDir, stdout: 'pipe', stderr: 'pipe' });
+    const link = spawnSync(process.execPath, ['link'], { cwd: projectDir, stdout: 'pipe', stderr: 'pipe' });
     if (link.status === 0) {
       console.log('✅ Binary linked');
     } else {
