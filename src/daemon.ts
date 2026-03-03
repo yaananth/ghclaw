@@ -331,12 +331,13 @@ async function main() {
 
   // Main polling loop
   let followerProbeCount = 0;  // Counts cycles since last probe
+  // Jitter: randomize probe interval so multiple followers don't probe simultaneously
+  const probeIntervalCycles = 6 + Math.floor(Math.random() * 4); // 30-50s (6-10 × 5s)
   while (isRunning) {
     if (!isLeader) {
       // Follower mode: periodically probe to detect dead leader
       followerProbeCount++;
-      if (followerProbeCount < 6) {
-        // Wait ~30s between probes (6 × 5s)
+      if (followerProbeCount < probeIntervalCycles) {
         await sleep(5000);
         continue;
       }
