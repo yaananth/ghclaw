@@ -37,6 +37,7 @@ import { isChronicleAvailable, getChronicleStats, getRecentSessions as getChroni
 import { parseActionBlocks, executeAction } from './actions';
 import { getGhToken } from './github/auth';
 import { startSyncLoop } from './github/sync';
+import { getVersion, getCommitHash } from './version';
 import * as fs from 'fs';
 import * as path from 'path';
 import { loadPrompt } from './prompts';
@@ -85,7 +86,7 @@ function getChatKey(chatId: string, threadId: string): string {
 }
 
 async function main() {
-  console.log('🤖 GHClaw Starting...\n');
+  console.log(`🤖 GHClaw v${getVersion()} (${getCommitHash()}) Starting...\n`);
 
   const config = await getConfigAsync();
 

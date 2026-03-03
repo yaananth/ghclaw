@@ -91,15 +91,18 @@ for EXTRA_DIR in "$HOME/.local/bin" "${BUN_INSTALL:-$HOME/.bun}/bin"; do
   fi
 done
 
-# 7. Verify
+# 7. Read installed version
+INSTALLED_VERSION=$(cd "$INSTALL_DIR" && node -e "console.log(JSON.parse(require('fs').readFileSync('package.json','utf-8')).version)" 2>/dev/null || echo "unknown")
+
+# 8. Verify
 export PATH="$BIN_DIR:$HOME/.local/bin:${BUN_INSTALL:-$HOME/.bun}/bin:$PATH"
 echo ""
 if command -v ghclaw &>/dev/null; then
-  echo "  ✅ ghclaw installed! ($(which ghclaw))"
+  echo "  ✅ ghclaw v${INSTALLED_VERSION} installed! ($(which ghclaw))"
   echo ""
   echo "  Next: ghclaw setup"
 else
-  echo "  ✅ ghclaw installed to $BIN_DIR"
+  echo "  ✅ ghclaw v${INSTALLED_VERSION} installed to $BIN_DIR"
   echo ""
   echo "  If 'ghclaw' is not found, open a new terminal or run:"
   echo "    source ~/.bashrc"

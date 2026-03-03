@@ -27,13 +27,14 @@ import {
   migrateFromEnv,
   getPlatform,
 } from '../src/secrets/keychain';
+import { getVersion } from '../src/version';
 
 const program = new Command();
 
 program
   .name('ghclaw')
   .description('Local Telegram bot powered by Copilot CLI')
-  .version('0.1.0');
+  .version(getVersion());
 
 // ============================================================================
 // Status
@@ -46,6 +47,8 @@ program
     console.log('╔══════════════════════════════════════════════════════════════╗');
     console.log('║                     GHClaw Status                          ║');
     console.log('╚══════════════════════════════════════════════════════════════╝\n');
+
+    console.log(`Version: v${getVersion()}`);
 
     // Config status
     const { complete, missing } = await isConfigComplete();
@@ -441,7 +444,8 @@ program
     const { spawnSync, spawn } = require('child_process');
     const projectDir = require('path').resolve(__dirname, '..');
 
-    console.log('📦 Upgrading ghclaw...\n');
+    const beforeVersion = getVersion();
+    console.log(`📦 Upgrading ghclaw from v${beforeVersion}...\n`);
 
     // Check for git remote
     const remoteCheck = spawnSync('git', ['remote', '-v'], { cwd: projectDir });
@@ -525,7 +529,7 @@ program
       }
     }
 
-    console.log('\n✅ Upgrade complete!');
+    console.log(`\n✅ Upgrade complete! v${beforeVersion} → v${getVersion()}`);
     process.exit(0);
   });
 
