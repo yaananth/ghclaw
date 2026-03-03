@@ -300,6 +300,7 @@ export function getSyncState(): SyncState {
 export async function startSyncLoop(
   config: Config,
   isRunning: () => boolean,
+  isLeader: () => boolean,
   onHandoff?: (pendingMessage?: HandoffRequest['pending_message']) => void | Promise<void>,
   onYield?: () => void,
 ): Promise<void> {
@@ -326,11 +327,13 @@ export async function startSyncLoop(
       // Pull first
       await gitPull(repoPath);
 
-      // On first run, always claim leadership (write our identity to leader.json)
-      // If another machine is actually polling, we'll get 409 and yield via the polling loop
+      // On first run, claim leadership only if daemon is actually the leader (polling).
+      // If we already got 409 and yielded, don't write leader.json.
       if (firstRun) {
         firstRun = false;
-        writeLeaderClaim(repoPath, config.machine.id, config.machine.name);
+        if (isLeader()) {
+          writeLeaderClaim(repoPath, config.machine.id, config.machine.name);
+        }
       }
 
       // Check for handoff requests
@@ -368,13 +371,17 @@ export async function startSyncLoop(
         }
       }
 
-      // Refresh leader.json timestamp if we're the leader (heartbeat for stale detection).
+      // Refresh leader.json timestamp if we're ACTUALLY the leader (daemon is polling).
       // Only refresh every 30s to avoid committing every 5s cycle.
-      const currentLeader = readLeaderClaim(repoPath);
-      if (currentLeader && currentLeader.machine_id === config.machine.id) {
-        if (Date.now() - lastLeaderRefresh > LEADER_REFRESH_MS) {
-          writeLeaderClaim(repoPath, config.machine.id, config.machine.name);
-          lastLeaderRefresh = Date.now();
+      // CRITICAL: check isLeader() from the daemon, not just leader.json —
+      // leader.json may still say us even after we yielded (409).
+      if (isLeader()) {
+        const currentLeader = readLeaderClaim(repoPath);
+        if (!currentLeader || currentLeader.machine_id === config.machine.id) {
+          if (Date.now() - lastLeaderRefresh > LEADER_REFRESH_MS) {
+            writeLeaderClaim(repoPath, config.machine.id, config.machine.name);
+            lastLeaderRefresh = Date.now();
+          }
         }
       }
 

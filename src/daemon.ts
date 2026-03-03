@@ -241,7 +241,7 @@ async function main() {
 
   // Start GitHub sync loop in background (also handles leader coordination)
   if (config.github.enabled && config.github.syncEnabled) {
-    startSyncLoop(config, () => isRunning,
+    startSyncLoop(config, () => isRunning, () => isLeader,
       // onHandoff: this machine should become leader
       async (pendingMessage) => {
         if (!isLeader) {
