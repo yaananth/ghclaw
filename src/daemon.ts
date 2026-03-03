@@ -83,6 +83,29 @@ function escapeMarkdown(text: string): string {
 // Key: "chatId:threadId", Value: Copilot session ID or "__new__" for fresh session
 const sessionOverrides = new Map<string, string>();
 
+// Dedup: track recently processed messages to prevent double-processing.
+// When a handoff fires, the pending message arrives via BOTH onHandoff callback
+// AND Telegram poll (offset wasn't acknowledged by the sender before yielding).
+// Uses content-based key (chatId:threadId:senderId:text) since handoff messages
+// have synthetic IDs that won't match Telegram message IDs.
+const recentlyProcessed = new Set<string>();
+const DEDUP_MAX_SIZE = 100;
+
+function getMessageKey(chatId: string, threadId: string, senderId: string, text: string): string {
+  return `${chatId}:${threadId}:${senderId}:${text.slice(0, 50)}`;
+}
+
+function markProcessed(key: string): boolean {
+  if (recentlyProcessed.has(key)) return false; // Already processed
+  recentlyProcessed.add(key);
+  // Evict oldest entries if set grows too large
+  if (recentlyProcessed.size > DEDUP_MAX_SIZE) {
+    const first = recentlyProcessed.values().next().value;
+    if (first) recentlyProcessed.delete(first);
+  }
+  return true; // First time seeing this
+}
+
 function getChatKey(chatId: string, threadId: string): string {
   return `${chatId}:${threadId}`;
 }
@@ -285,6 +308,13 @@ async function main() {
           const sanitizedText = secResult.sanitizedText ?? pendingMessage.text;
           console.log(`📨 Processing handed-off message in chat ${pendingMessage.chat_id} thread ${pendingMessage.thread_id}`);
 
+          // Mark as processed FIRST to prevent the follower probe from duplicating
+          const handoffDedupKey = getMessageKey(
+            pendingMessage.chat_id, pendingMessage.thread_id || '0',
+            senderId, sanitizedText
+          );
+          markProcessed(handoffDedupKey);
+
           const msg: ChannelMessage = {
             id: `handoff-${Date.now()}`,
             chatId: pendingMessage.chat_id,
@@ -440,6 +470,13 @@ async function processMessage(
   const isForum = message.isThreaded;
 
   if (!text || user.isBot) return;
+
+  // Dedup: skip if we already processed this exact message (handoff + poll race)
+  const dedupKey = getMessageKey(chatId, threadId, user.id, text);
+  if (!markProcessed(dedupKey)) {
+    console.log(`⏭️ Skipping duplicate message in ${chatId}:${threadId}`);
+    return;
+  }
 
   // Security check FIRST - before any logging
   // Each channel type runs its own security checks.
