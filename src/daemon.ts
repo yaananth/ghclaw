@@ -240,33 +240,68 @@ async function main() {
 
   // Start GitHub sync loop in background (also handles leader coordination)
   if (config.github.enabled && config.github.syncEnabled) {
-    // Claim leadership on startup (first to claim wins)
-    writeLeaderClaim(config.github.repoPath, config.machine.id, config.machine.name);
-
     startSyncLoop(config, () => isRunning,
       // onHandoff: this machine should become leader
-      (pendingMessage) => {
+      async (pendingMessage) => {
         if (!isLeader) {
           console.log('👑 Handoff received — becoming leader (resuming polling)');
           isLeader = true;
         }
         // Process the pending message that triggered the handoff
+        // Run full security check using synthetic TelegramMessage (same as normal path)
         if (pendingMessage) {
+          const senderId = pendingMessage.from_user_id;
+
+          // Reject if sender ID is missing (can't verify security)
+          if (!senderId) {
+            console.log('🚫 Handed-off message blocked: missing sender ID');
+            return;
+          }
+
+          // Build synthetic TelegramMessage for full security check
+          const syntheticMsg = {
+            message_id: 0,
+            date: Math.floor(Date.now() / 1000),
+            chat: {
+              id: parseInt(pendingMessage.chat_id),
+              type: 'supergroup' as const,
+            },
+            from: {
+              id: parseInt(senderId),
+              is_bot: false,
+              first_name: pendingMessage.from_user || 'Unknown',
+            },
+            text: pendingMessage.text,
+            message_thread_id: pendingMessage.thread_id !== '0' ? parseInt(pendingMessage.thread_id) : undefined,
+          };
+
+          const secResult = checkMessageSecurity(syntheticMsg, security);
+          if (!secResult.allowed) {
+            console.log(`🚫 Handed-off message blocked: ${secResult.reason}`);
+            return;
+          }
+
+          const sanitizedText = secResult.sanitizedText ?? pendingMessage.text;
           console.log(`📨 Processing handed-off message in chat ${pendingMessage.chat_id} thread ${pendingMessage.thread_id}`);
+
           const msg: ChannelMessage = {
             id: `handoff-${Date.now()}`,
             chatId: pendingMessage.chat_id,
             threadId: pendingMessage.thread_id,
-            text: pendingMessage.text,
+            text: sanitizedText,
             sender: {
-              id: '0',
+              id: senderId,
               displayName: pendingMessage.from_user || 'Unknown',
               isBot: false,
             },
             timestamp: new Date(),
             isThreaded: !!pendingMessage.thread_id && pendingMessage.thread_id !== '0',
           };
-          processMessage(channel, channelConfig.type, msg, security, config).catch(err => {
+          const chatInfo = channel.getChatInfo ? await channel.getChatInfo(msg.chatId).catch(() => null) : null;
+          processMessageInner(
+            channel, msg, sanitizedText, security, config,
+            msg.chatId, msg.threadId || '0', chatInfo?.isForum ?? false
+          ).catch(err => {
             console.error(`❌ Failed to process handed-off message: ${err}`);
           });
         }
@@ -305,6 +340,7 @@ async function main() {
       const messages = await channel.poll(config.telegram.pollTimeoutSeconds);
 
       for (const message of messages) {
+        if (!isLeader) break; // Stop processing batch if we yielded during handoff
         await processMessage(channel, channelConfig.type, message, security, config);
       }
     } catch (error) {
@@ -485,11 +521,17 @@ async function processMessageInner(
           config.machine.id, config.machine.name,
           targetId, targetName,
           `Message in session "${sessionName}" owned by ${targetName}`,
-          { chat_id: chatId, thread_id: threadId, text: prompt, from_user: message.sender?.displayName }
+          { chat_id: chatId, thread_id: threadId, text: message.text, from_user: message.sender?.displayName, from_user_id: message.sender?.id }
         );
         // Push handoff immediately so target picks it up fast
-        const { gitCommitAndPush: pushNow } = await import('./github/repo');
-        pushNow(config.github.repoPath, `handoff: ${config.machine.name} → ${targetName}`).catch(() => {});
+        const { gitCommitAndPush: pushNow, hasChanges: checkDirty } = await import('./github/repo');
+        try {
+          if (await checkDirty(config.github.repoPath)) {
+            await pushNow(config.github.repoPath, `handoff: ${config.machine.name} → ${targetName}`);
+          }
+        } catch (pushErr) {
+          console.log(`⚠️ Handoff push failed: ${pushErr} (target will pick up on next sync)`);
+        }
         // Yield leadership
         isLeader = false;
 

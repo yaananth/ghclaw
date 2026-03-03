@@ -38,6 +38,8 @@ ghclaw has a deliberate three-tier memory architecture: a thin local mapping lay
 │  ┌─────────────────────────────────────────────────────────────┐  │
 │  │  memory/sessions.json         (exported session metadata)    │  │
 │  │  memory/machines/{id}.json    (per-machine snapshots)        │  │
+│  │  memory/leader.json           (current leader identity)      │  │
+│  │  memory/handoff.json          (pending handoff message)      │  │
 │  │  .github/workflows/           (reminders + schedules)        │  │
 │  └─────────────────────────────────────────────────────────────┘  │
 │  Synced every 5 seconds via git pull/push                          │
@@ -113,6 +115,8 @@ ghclaw reads Chronicle to:
 |------|---------|-----------|
 | `memory/sessions.json` | All active sessions (metadata only) | Local → GitHub |
 | `memory/machines/{id}.json` | Per-machine session snapshot + machine info | Local → GitHub |
+| `memory/leader.json` | Current leader machine identity + claim timestamp | Local ↔ GitHub |
+| `memory/handoff.json` | Pending message for target machine during leader handoff | Local ↔ GitHub |
 | `.github/workflows/remind-*.yml` | Reminder workflows (self-deleting) | Local ↔ GitHub |
 | `.github/workflows/sched-*.yml` | Recurring schedule workflows | Local ↔ GitHub |
 
@@ -224,19 +228,26 @@ Selection state expires after 5 minutes.
 ## Multi-Machine Session Routing
 
 ```
-Message arrives at Machine A
+Message arrives at Leader machine
     │
     ├── Lookup session in sessions.sqlite
     │
     ├── session.machine_id === my machine_id?
     │       │
     │       YES → Process with Copilot CLI
-    │       NO  → Reply: "💻 This session lives on [machine-name]"
+    │       NO  → Trigger handoff:
+    │               1. Write memory/handoff.json (target machine + pending message)
+    │               2. Push to sync repo
+    │               3. Yield leadership (stop polling)
+    │               4. Target machine picks up handoff via sync loop
+    │               5. Target claims leadership + processes message
     │
     └── No existing session?
             │
             Create new, tag with my machine_id
 ```
+
+If no sync repo is configured, cross-machine handoff is unavailable. The leader claims the session locally and processes it.
 
 ## Streaming
 

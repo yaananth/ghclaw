@@ -186,7 +186,7 @@ A **Channel Registry** (`src/channels/registry.ts`) auto-detects configured chan
 6. Session Lookup
    ├─▶ getOrCreateSession(chatId, threadId, channelType)
    ├─▶ Check machine_id ownership
-   └─▶ Wrong machine → redirect notice, STOP
+   └─▶ Wrong machine → trigger handoff (write handoff.json, yield leadership), STOP
 
 7. Auto-create thread (if channel supports threading and in main chat)
    └─▶ AI-generated thread title (background)
@@ -249,6 +249,8 @@ Every 5 seconds:
 └── repo/                 # Git clone of {user}/.ghclaw
     ├── memory/
     │   ├── sessions.json
+    │   ├── leader.json
+    │   ├── handoff.json
     │   └── machines/
     ├── .github/workflows/
     │   ├── notify.yml
@@ -316,12 +318,54 @@ Multiple machines share the same channel group/workspace. Each machine:
 - Owns its sessions via `machine_id` in the session mapper
 - Syncs its data to `memory/machines/{id}.json` in the GitHub repo
 
-### Soft Routing
+### Leader/Follower Model
 
-All machines poll the same channel. When a message arrives:
+Only one machine polls the channel at a time. The active poller is the **leader**; all other machines run as **followers** (sync-only mode — they still run the git sync loop but do not poll for messages).
+
+Leadership is tracked via `memory/leader.json` in the sync repo:
+
+```json
+{
+  "machine_id": "uuid-of-leader",
+  "machine_name": "MacBook",
+  "claimed_at": "2026-03-02T10:00:00Z"
+}
+```
+
+On startup, a machine writes `memory/leader.json` to claim leadership and pushes to the sync repo. If another machine already holds leadership, the new machine starts as a follower.
+
+### Leader Handoff
+
+When the leader receives a message for a session owned by a different machine, it triggers a **handoff** instead of processing locally:
+
+1. The leader writes `memory/handoff.json` with the pending message and the target machine ID:
+   ```json
+   {
+     "target_machine_id": "uuid-of-target",
+     "message": { "chat_id": 123, "thread_id": 456, "text": "continue fixing auth" },
+     "from_machine_id": "uuid-of-leader",
+     "created_at": "2026-03-02T10:05:00Z"
+   }
+   ```
+2. The leader pushes to the sync repo.
+3. The leader yields leadership (stops polling).
+
+The target machine's sync loop detects the handoff file, claims leadership (writes `memory/leader.json`), picks up the pending message, processes it, and deletes `memory/handoff.json`.
+
+### Automatic Failover
+
+If the leader goes offline (crashes, sleeps, network loss), followers detect stale leadership during their sync loop. The first follower to successfully claim `memory/leader.json` and push becomes the new leader and begins polling.
+
+### Fallback (No Sync Repo)
+
+If no sync repo is configured, the single running instance always acts as leader. Cross-machine session ownership is ignored — the local machine claims any session it encounters and processes it locally.
+
+### Soft Routing (Handoff Trigger)
+
+All active session lookups still check `machine_id` ownership. When a message arrives:
 1. Look up session → check `machine_id`
 2. **Match** → process normally
-3. **Mismatch** → reply: "This session lives on [machine]. Resume there."
+3. **Mismatch** → trigger handoff to the owning machine (write `memory/handoff.json`, yield leadership)
 4. **New session** → claim it with current `machine_id`
 
 ## Security Model

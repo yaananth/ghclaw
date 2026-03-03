@@ -47,6 +47,7 @@ export interface HandoffRequest {
     thread_id: string;
     text: string;
     from_user?: string;
+    from_user_id?: string; // Original sender's ID for security validation
   };
 }
 
@@ -215,7 +216,7 @@ export function getSyncState(): SyncState {
 export async function startSyncLoop(
   config: Config,
   isRunning: () => boolean,
-  onHandoff?: (pendingMessage?: HandoffRequest['pending_message']) => void,
+  onHandoff?: (pendingMessage?: HandoffRequest['pending_message']) => void | Promise<void>,
   onYield?: () => void,
 ): Promise<void> {
   if (!config.github.enabled || !config.github.syncEnabled) {
@@ -231,10 +232,20 @@ export async function startSyncLoop(
 
   console.log(`🔄 Starting GitHub sync (every ${config.github.syncIntervalMs / 1000}s)...`);
 
+  let firstRun = true;
   while (isRunning()) {
     try {
       // Pull first
       await gitPull(repoPath);
+
+      // On first run, claim leadership after pull (so working tree is clean)
+      if (firstRun) {
+        firstRun = false;
+        const existingLeader = readLeaderClaim(repoPath);
+        if (!existingLeader || existingLeader.machine_id === config.machine.id) {
+          writeLeaderClaim(repoPath, config.machine.id, config.machine.name);
+        }
+      }
 
       // Check for handoff requests
       const handoff = readHandoffRequest(repoPath);
@@ -245,7 +256,7 @@ export async function startSyncLoop(
           clearHandoffRequest(repoPath);
           writeLeaderClaim(repoPath, config.machine.id, config.machine.name);
           await gitCommitAndPush(repoPath, `leader: ${config.machine.name} (handoff from ${handoff.from_machine_name})`);
-          onHandoff?.(handoff.pending_message);
+          await onHandoff?.(handoff.pending_message);
         } else if (handoff.from_machine_id === config.machine.id) {
           // We requested the handoff — yield
           // (handoff file still present means target hasn't claimed yet, wait)
