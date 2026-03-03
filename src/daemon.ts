@@ -991,7 +991,7 @@ async function syncChronicleToTopics(
 
         const thread = await channel.createThread(chatId, `🤖 [${config.machine.name}] ${topicName}`);
 
-        createSessionWithTopic(chatIdNum, parseInt(thread.threadId), session.id, topicName);
+        createSessionWithTopic(chatIdNum, parseInt(thread.threadId), session.id, topicName, config.machine.id, config.machine.name);
 
         console.log(`📌 [Sync] Created topic for Chronicle session: ${session.id.slice(0, 8)} -> "${topicName}"`);
 
