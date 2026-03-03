@@ -93,7 +93,8 @@ export async function cloneRepo(username: string, localPath: string, repoName: s
     if (contents.length === 0) {
       fs.rmdirSync(localPath);
     } else if (fs.existsSync(path.join(localPath, '.git'))) {
-      // Already cloned
+      // Already cloned — ensure credential helper is correct
+      await fixGitCredentialHelper(localPath);
       return;
     }
   }
@@ -110,6 +111,39 @@ export async function cloneRepo(username: string, localPath: string, repoName: s
     const stderr = await new Response(proc.stderr).text();
     throw new Error(`Failed to clone repo: ${stderr}`);
   }
+
+  // In Codespaces, override the credential helper so git uses gh auth
+  // instead of the Codespace-provided helper (which returns a limited token)
+  await fixGitCredentialHelper(localPath);
+}
+
+/**
+ * Fix git credential helper for Codespaces.
+ * The Codespace-provided credential helper returns a limited GITHUB_TOKEN.
+ * Override it to use `gh auth token` which has proper user scopes.
+ */
+async function fixGitCredentialHelper(repoPath: string): Promise<void> {
+  // Only needed when the Codespace credential helper is active
+  const proc = Bun.spawn(['git', 'config', 'credential.helper'], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+    cwd: repoPath,
+  });
+  await proc.exited;
+  const helper = (await new Response(proc.stdout).text()).trim();
+  if (!helper.includes('codespace') && !helper.includes('gitcredential_github')) return;
+
+  // Override with a helper that uses gh auth token (stored user auth)
+  const setProc = Bun.spawn([
+    'git', 'config', 'credential.helper',
+    '!f() { echo "protocol=https"; echo "host=github.com"; echo "username=x-access-token"; echo "password=$(GITHUB_TOKEN= gh auth token)"; }; f',
+  ], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+    cwd: repoPath,
+    env: cleanGhEnv(),
+  });
+  await setProc.exited;
 }
 
 /**
