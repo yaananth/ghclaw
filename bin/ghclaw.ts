@@ -843,6 +843,88 @@ program
   });
 
 program
+  .command('clear-topics')
+  .description('Delete ALL topics from the Telegram group and reset sync state')
+  .option('--yes', 'Skip confirmation prompt')
+  .action(async (options) => {
+    const config = await getConfigAsync();
+    const client = new TelegramClient(config.telegram.botToken);
+
+    if (!config.telegram.allowedGroupId) {
+      console.log('❌ No group configured. Run: ghclaw setup');
+      return;
+    }
+
+    const chatId = config.telegram.allowedGroupId;
+
+    // Collect all known topic IDs from DB
+    const { initDatabase } = await import('../src/memory/session-mapper');
+    const db = initDatabase();
+    const topicIds = new Set<number>();
+
+    const rows = db.prepare(`
+      SELECT DISTINCT topic_id FROM sessions WHERE chat_id = ? AND topic_id IS NOT NULL AND topic_id > 0
+      UNION
+      SELECT DISTINCT thread_id FROM sessions WHERE chat_id = ? AND thread_id > 0
+    `).all(chatId, chatId) as { topic_id: number }[];
+    for (const r of rows) topicIds.add(r.topic_id);
+
+    if (topicIds.size === 0) {
+      console.log('No tracked topics found in DB.');
+      console.log('Use `ghclaw clean-topics --scan` or `--id` to target untracked topics.');
+      return;
+    }
+
+    console.log(`Found ${topicIds.size} topic(s) to delete: ${[...topicIds].join(', ')}`);
+    console.log('This will also clear Chronicle sync state (synced_chronicle_sessions).\n');
+
+    if (!options.yes) {
+      const inquirer = (await import('inquirer')).default;
+      const { confirm } = await inquirer.prompt([{
+        type: 'confirm',
+        name: 'confirm',
+        message: `Delete ALL ${topicIds.size} topic(s) and reset sync state? This is irreversible.`,
+        default: false,
+      }]);
+      if (!confirm) {
+        console.log('Cancelled.');
+        return;
+      }
+    }
+
+    console.log(`\nDeleting ${topicIds.size} topic(s)...\n`);
+
+    let deleted = 0;
+    let failed = 0;
+    for (const topicId of topicIds) {
+      try {
+        const ok = await client.deleteForumTopic(chatId, topicId);
+        if (ok) {
+          console.log(`  ✅ Deleted topic ${topicId}`);
+          deleted++;
+        } else {
+          console.log(`  ⚠️ Could not delete topic ${topicId}`);
+          failed++;
+        }
+      } catch (err) {
+        console.log(`  ❌ Error deleting topic ${topicId}: ${err}`);
+        failed++;
+      }
+      await new Promise(r => setTimeout(r, 300));
+    }
+
+    // Clean up ALL session mappings for this group
+    db.prepare(`DELETE FROM sessions WHERE chat_id = ?`).run(chatId);
+
+    // Clear Chronicle sync state so topics aren't immediately re-created
+    db.prepare(`DELETE FROM synced_chronicle_sessions`).run();
+
+    console.log(`\n✅ Done: ${deleted} deleted, ${failed} failed.`);
+    console.log('   Session mappings cleared for this group.');
+    console.log('   Chronicle sync state reset (topics won\'t be re-created on next daemon start).');
+  });
+
+program
   .command('test')
   .description('Test Telegram and Copilot connections')
   .action(async () => {

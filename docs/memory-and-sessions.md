@@ -126,10 +126,13 @@ ghclaw reads Chronicle to:
 Every 5 seconds (configurable):
   1. git pull --no-rebase (merge, strategy-option=theirs)
      └─ Auto-aborts stuck rebases before pulling
-  2. Check leader claim + handoff requests
-  3. Compare session data with existing files
-  4. Export sessions/machine info ONLY if data changed
-  5. git commit && push ONLY if files were written
+     └─ All git ops serialized via async mutex (withGitLock)
+  2. Check leader claim + handoff requests (see Multi-Machine section)
+  3. Refresh leader.json heartbeat every 30s (only if this machine IS the leader)
+  4. Compare session data with existing files
+  5. Export sessions/machine info ONLY if data changed
+     └─ Includes chat_id/thread_id for cross-machine ownership lookups
+  6. git commit && push ONLY if files were written
 ```
 
 Smart sync: `exportSessionsToJson` and `exportMachineInfo` compare meaningful session data (excluding volatile timestamps like `exportedAt`) against existing files. If nothing changed, no write occurs, and no commit/push is triggered. This prevents hundreds of empty sync commits when the daemon is idle.
@@ -183,8 +186,8 @@ When the daemon starts, a background loop syncs Chronicle sessions to channel th
 ```
 Every 10 seconds:
   1. Get the 5 most recent Chronicle sessions (by recency, not time window)
-  2. Filter: only multi-turn interactive sessions
-  3. Filter: skip ghclaw's own bot sessions
+  2. Filter: sessions with at least 1 turn (includes single-question interactive sessions)
+  3. Filter: skip ghclaw's own bot sessions (detected by summary content)
   4. Check against synced_chronicle_sessions table (persists across restarts)
   5. For each new session:
      a. Create channel thread: "🤖 [MacBook] Mar01 2:14pm · myapp · Fix auth bug"
@@ -192,6 +195,8 @@ Every 10 seconds:
      c. Send welcome message with session summary
   6. Rate limit: max 3 new topics per cycle
 ```
+
+Note: ghclaw's own `-p` sessions (title generation, schedule parsing) are caught by the bot session summary filter. User's own terminal `-p` sessions are intentionally included since they're indistinguishable from interactive single-question sessions and are worth surfacing.
 
 ## Natural Language Interactions
 
@@ -232,17 +237,26 @@ Selection state expires after 5 minutes.
 ```
 Message arrives at Leader machine
     │
-    ├── Lookup session in sessions.sqlite
+    ├── Dedup check (content-based: chatId:threadId:senderId:text)
+    │   └─ Skip if already processed (handoff + poll race)
     │
-    ├── session.machine_id === my machine_id?
+    ├── Lookup session in local sessions.sqlite
+    │
+    ├── Cross-machine ownership check:
+    │   1. Local SQLite may have wrong owner (each machine has its own DB)
+    │   2. Check sync repo machine files (memory/machines/{id}.json)
+    │   3. Correct local DB if sync repo shows different owner
+    │
+    ├── session owner === my machine_id?
     │       │
     │       YES → Process with Copilot CLI
     │       NO  → Trigger handoff:
-    │               1. Write memory/handoff.json (target machine + pending message)
-    │               2. Push to sync repo
-    │               3. Yield leadership (stop polling)
-    │               4. Target machine picks up handoff via sync loop
-    │               5. Target claims leadership + processes message
+    │               1. Write memory/handoff.json (target + pending message + sender ID)
+    │               2. Update memory/leader.json to point to target
+    │               3. Yield leadership (stop polling, enter follower mode)
+    │               4. Sync loop commits both files within ~5s
+    │               5. Target machine's sync loop detects handoff
+    │               6. Target claims leadership, processes message, deletes handoff.json
     │
     └── No existing session?
             │
@@ -251,13 +265,31 @@ Message arrives at Leader machine
 
 If no sync repo is configured, cross-machine handoff is unavailable. The leader claims the session locally and processes it.
 
+### Handoff Message Lifecycle
+
+1. **Created**: Leader writes `handoff.json` with pending message, target machine ID, and original sender's user ID (for security validation)
+2. **Committed**: Sync loop commits to repo within ~5 seconds (no separate push — prevents git race)
+3. **Picked up**: Target machine's sync loop detects `to_machine_id` match → claims leadership → runs full security check on message → processes it
+4. **Deleted**: Target calls `clearHandoffRequest()` which removes the file
+5. **Stale recovery**: If target doesn't pick up within 60s, sender reclaims and processes. After 90s, any third machine can recover.
+
 ### Automatic Failover
 
-If the leader goes offline, followers detect this lazily via poll probes every ~30 seconds:
-- **Poll succeeds (no 409):** Leader is dead → follower claims leadership and resumes polling
-- **Poll gets 409 Conflict:** Leader is still alive → stay as follower
+If the leader goes offline, followers detect this via **passive leader.json staleness** (no channel API calls):
 
-No heartbeat commits needed — Telegram's 409 response IS the liveness signal.
+```
+Follower loop (every 10 seconds):
+  1. Read leader.json from local sync repo copy
+  2. If claimed_at > 2 minutes stale → leader is dead
+  3. Claim leadership (write leader.json)
+  4. Resume polling
+```
+
+Followers NEVER call the channel API (e.g., Telegram `getUpdates`) — a follower probe would trigger a 409 Conflict that disrupts the actual leader's polling. The leader's 30-second heartbeat (refreshing `leader.json`) serves as the liveness signal.
+
+### Git Operations
+
+All git operations (pull, commit, push) are serialized via an async mutex (`withGitLock` in `repo.ts`). This prevents the sync loop and handoff writes from racing on the same git working tree, which would cause silent push failures.
 
 ## Streaming
 

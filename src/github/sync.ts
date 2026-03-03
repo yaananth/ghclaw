@@ -10,7 +10,6 @@ import * as path from 'path';
 import { gitPull, gitCommitAndPush, hasChanges } from './repo';
 import { type Config } from '../config';
 import {
-  getActiveSessions,
   getSessionsByMachine,
   type TelegramSession,
 } from '../memory/session-mapper';
@@ -386,9 +385,9 @@ export async function startSyncLoop(
       }
 
       // Export local data (only writes files if data actually changed)
-      const allSessions = getActiveSessions(100);
-      const sessionsChanged = exportSessionsToJson(repoPath, allSessions);
-
+      // NOTE: We only export per-machine data. sessions.json was removed because
+      // each machine overwrites it with its own local DB, causing ping-pong commits
+      // when multiple machines are running. Per-machine files are authoritative.
       const machineSessions = getSessionsByMachine(config.machine.id);
       const machineChanged = exportMachineInfo(repoPath, config.machine.id, config.machine.name, machineSessions);
 

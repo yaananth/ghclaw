@@ -334,45 +334,104 @@ Leadership is tracked via `memory/leader.json` in the sync repo:
 }
 ```
 
-On startup, a machine writes `memory/leader.json` to claim leadership and pushes to the sync repo. If another machine already holds leadership, the new machine starts as a follower.
+The leader refreshes `claimed_at` every 30 seconds as a heartbeat. Followers read this timestamp to detect dead leaders.
+
+### Follower Mode (Passive Detection)
+
+Followers do NOT make any channel API calls (e.g., Telegram `getUpdates`). A follower probe would trigger a 409 Conflict response that disrupts the actual leader's polling.
+
+Instead, followers use **passive leader.json staleness detection**:
+
+```
+Every 10 seconds (follower loop):
+  1. Read leader.json from local sync repo (updated by git sync loop)
+  2. Check claimed_at timestamp
+  3. If stale > 2 minutes → leader is dead → claim leadership
+  4. If no leader.json → claim leadership
+  5. Otherwise → stay as follower, loop
+```
+
+A machine transitions to follower on:
+- **409 Conflict** from the channel API (another instance is polling)
+- **Handoff**: when routing a message to another machine's session
 
 ### Leader Handoff
 
-When the leader receives a message for a session owned by a different machine, it triggers a **handoff** instead of processing locally:
+When the leader receives a message for a session owned by a different machine, it triggers a **handoff**:
 
-1. The leader writes `memory/handoff.json` with the pending message and the target machine ID:
+1. Leader looks up session ownership via local SQLite + sync repo machine files
+2. Detects mismatch: session belongs to another machine
+3. Writes `memory/handoff.json`:
    ```json
    {
-     "target_machine_id": "uuid-of-target",
-     "message": { "chat_id": 123, "thread_id": 456, "text": "continue fixing auth" },
      "from_machine_id": "uuid-of-leader",
-     "created_at": "2026-03-02T10:05:00Z"
+     "from_machine_name": "MacBook",
+     "to_machine_id": "uuid-of-target",
+     "to_machine_name": "Codespace",
+     "reason": "Message in session owned by Codespace",
+     "requested_at": "2026-03-02T10:05:00Z",
+     "pending_message": {
+       "chat_id": "123",
+       "thread_id": "456",
+       "text": "continue fixing auth",
+       "from_user": "Yash",
+       "from_user_id": "789"
+     }
    }
    ```
-2. The leader pushes to the sync repo.
-3. The leader yields leadership (stops polling).
+4. Updates `leader.json` to point to the target machine
+5. Yields leadership (stops polling, enters follower mode)
+6. Does NOT push separately — the sync loop commits both files within ~5 seconds
 
-The target machine's sync loop detects the handoff file, claims leadership (writes `memory/leader.json`), picks up the pending message, processes it, and deletes `memory/handoff.json`.
+The target machine's sync loop detects the handoff, claims leadership, runs a full security check on the pending message, processes it, and deletes `handoff.json`.
+
+### Handoff.json Lifecycle
+
+| Event | Who | Action |
+|-------|-----|--------|
+| Created | Leader (sender) | Writes `handoff.json` with pending message + target machine ID |
+| Committed | Sync loop | Commits `handoff.json` + `leader.json` to sync repo (~5s) |
+| Picked up | Target machine | Sync loop detects `to_machine_id` match → claims leadership, processes message |
+| Deleted | Target machine | `clearHandoffRequest()` removes the file after pickup |
+| Stale (60s) | Sender reclaims | If target is offline, sender deletes handoff, reclaims leadership, processes message |
+| Stale (90s) | Any machine recovers | If both sender and target are offline, any third machine cleans up |
+
+### Message Deduplication
+
+During handoff, the same message can arrive twice:
+1. Via the `onHandoff` callback (from `handoff.json`)
+2. Via the Telegram poll (the sender didn't acknowledge the offset before yielding)
+
+A content-based dedup key (`chatId:threadId:senderId:text`) prevents double-processing. The handoff callback marks the message as processed first; the poll path skips it.
+
+### Cross-Machine Session Ownership
+
+Each machine has its own local SQLite database — they are NOT shared. When a message arrives for a topic created by another machine:
+
+1. Local SQLite has no row → `getOrCreateSession` creates one with THIS machine's ID
+2. Before processing, `lookupSessionOwner()` checks per-machine files in the sync repo (`memory/machines/{id}.json`)
+3. If another machine owns it → correct local SQLite via `claimSession()` → trigger handoff
+4. Handoff-received messages skip this check (`skipOwnershipCheck=true`) to prevent ping-pong
+
+### Git Mutex
+
+The sync loop and handoff both operate on the same git working tree. An async mutex (`withGitLock`) in `repo.ts` serializes all git operations (pull, commit, push) to prevent silent failures from concurrent access.
 
 ### Automatic Failover
 
-If the leader goes offline (crashes, sleeps, network loss), followers detect this lazily. Every ~30 seconds, a follower attempts a short poll probe:
-- **Poll succeeds (no 409):** Leader is dead → follower claims leadership, resumes polling, processes any messages received
-- **Poll gets 409 Conflict:** Leader is alive → stay as follower
+If the leader goes offline (crashes, sleeps, network loss):
+1. Leader stops refreshing `leader.json` (no more 30s heartbeat)
+2. Followers see `claimed_at` become stale (>2 minutes old)
+3. First follower to detect staleness claims leadership
+4. New leader resumes polling, processes any queued messages
 
-No heartbeat commits or timestamp-based detection needed — Telegram's 409 Conflict response IS the heartbeat.
+### Startup Sync
+
+On startup, the daemon pulls the sync repo **before** polling to ensure fresh machine files for ownership checks. Without this, the first message could arrive before the sync loop's first pull, causing `lookupSessionOwner` to miss other machines' sessions.
 
 ### Fallback (No Sync Repo)
 
 If no sync repo is configured, the single running instance always acts as leader. Cross-machine session ownership is ignored — the local machine claims any session it encounters and processes it locally.
-
-### Soft Routing (Handoff Trigger)
-
-All active session lookups still check `machine_id` ownership. When a message arrives:
-1. Look up session → check `machine_id`
-2. **Match** → process normally
-3. **Mismatch** → trigger handoff to the owning machine (write `memory/handoff.json`, yield leadership)
-4. **New session** → claim it with current `machine_id`
 
 ## Security Model
 
@@ -388,11 +447,14 @@ Six layers:
 
 ## YOLO Mode
 
-When enabled (`copilot.yoloMode: true`), passes `--allow-all-tools` to Copilot CLI:
+When enabled (`copilot.yoloMode: true`), passes `--yolo` to Copilot CLI (equivalent to `--allow-all-tools --allow-all-paths --allow-all-urls`):
 - File system operations
 - Shell command execution
 - Web browsing
 - All MCP tools
+- Skips folder trust prompts and all interactive approvals
+
+`--yolo` is used instead of `--allow-all-tools` because the daemon is non-interactive (piped stdout/stderr, no stdin). `--allow-all-tools` alone does NOT skip folder trust prompts, causing the daemon to hang.
 
 **Default: OFF.**
 
