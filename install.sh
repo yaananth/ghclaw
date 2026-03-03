@@ -48,7 +48,10 @@ fi
 if [ -d "$INSTALL_DIR/.git" ]; then
   echo ""
   echo "🔄 Updating ghclaw..."
-  git -C "$INSTALL_DIR" pull --rebase --autostash --quiet
+  # Drop any local changes — install dir is managed by the installer, not the user
+  git -C "$INSTALL_DIR" reset --hard --quiet
+  git -C "$INSTALL_DIR" clean -fd --quiet
+  git -C "$INSTALL_DIR" pull --rebase --quiet
 else
   echo ""
   echo "📥 Cloning ghclaw..."
