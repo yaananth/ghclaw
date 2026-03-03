@@ -487,9 +487,9 @@ export async function runSetup(): Promise<void> {
     if (hasGithubTokenEnv) {
       // GITHUB_TOKEN env var overrides gh CLI auth — temporarily unset and re-auth
       console.log(`⚠️  Missing scopes: ${auth.missingScopes.join(', ')}`);
-      console.log('   GITHUB_TOKEN env var detected (Codespaces) — temporarily unsetting to authenticate properly...\n');
-      const savedToken = process.env.GITHUB_TOKEN;
-      delete process.env.GITHUB_TOKEN;
+      console.log('   GITHUB_TOKEN env var detected (Codespaces) — unsetting to authenticate properly...\n');
+      // Set to empty string (not delete) — Bun child processes still see deleted vars
+      process.env.GITHUB_TOKEN = '';
 
       // Check if there's already a proper gh auth behind the env var
       const behindAuth = await checkGhAuth();
@@ -503,15 +503,13 @@ export async function runSetup(): Promise<void> {
           stdin: 'inherit',
           stdout: 'inherit',
           stderr: 'inherit',
-          env: { ...process.env }, // env without GITHUB_TOKEN
         });
         await loginProc.exited;
         const recheck = await checkGhAuth();
         Object.assign(auth, recheck);
       }
 
-      // Keep GITHUB_TOKEN unset for the rest of setup so gh uses proper auth
-      // (don't restore — the Codespace token is too limited)
+      // Keep GITHUB_TOKEN empty for the rest of setup so gh uses proper auth
     } else {
       console.log(`⚠️  Missing scopes: ${auth.missingScopes.join(', ')}`);
       console.log('   Refreshing auth scopes...\n');
