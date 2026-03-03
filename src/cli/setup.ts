@@ -458,20 +458,22 @@ export async function runSetup(): Promise<void> {
     console.log('  - Session persistence\n');
 
   // Auto-detect gh CLI auth
+  // In Codespaces, GITHUB_TOKEN is auto-set with limited scopes and blocks gh auth refresh.
+  // We need to detect this and work around it.
+  const hasGithubTokenEnv = !!process.env.GITHUB_TOKEN;
+
   console.log('🔍 Checking GitHub CLI auth...');
   const auth = await checkGhAuth();
 
   if (!auth.authenticated) {
     console.log('⚠️  GitHub CLI not authenticated.');
     console.log('   Running: gh auth login\n');
-    // Auto-launch gh auth login
     const loginProc = Bun.spawn(['gh', 'auth', 'login', '-s', 'repo,workflow'], {
       stdin: 'inherit',
       stdout: 'inherit',
       stderr: 'inherit',
     });
     await loginProc.exited;
-    // Re-check
     const recheck = await checkGhAuth();
     if (!recheck.authenticated) {
       console.log('❌ GitHub auth failed. GitHub features will be disabled.');
@@ -482,22 +484,38 @@ export async function runSetup(): Promise<void> {
   }
 
   if (auth.authenticated && auth.missingScopes.length > 0) {
-    console.log(`⚠️  Missing scopes: ${auth.missingScopes.join(', ')}`);
-    console.log('   Refreshing auth scopes...\n');
-    const refreshProc = Bun.spawn(['gh', 'auth', 'refresh', '-s', 'repo,workflow'], {
-      stdin: 'inherit',
-      stdout: 'inherit',
-      stderr: 'inherit',
-    });
-    await refreshProc.exited;
-    // Re-check scopes
-    const recheck = await checkGhAuth();
-    Object.assign(auth, recheck);
+    if (hasGithubTokenEnv) {
+      // GITHUB_TOKEN env var overrides gh CLI auth — can't refresh scopes
+      console.log(`⚠️  Missing scopes: ${auth.missingScopes.join(', ')}`);
+      console.log('   GITHUB_TOKEN env var is set (common in Codespaces) with limited scopes.');
+      console.log('   gh auth refresh cannot override it.\n');
+      console.log('   To fix, run:');
+      console.log('     unset GITHUB_TOKEN');
+      console.log('     gh auth login -s repo,workflow');
+      console.log('   Then re-run: ghclaw setup\n');
+      console.log('   Continuing with limited GitHub features...\n');
+      // Still try to proceed — repo detection may work even with limited scopes
+    } else {
+      console.log(`⚠️  Missing scopes: ${auth.missingScopes.join(', ')}`);
+      console.log('   Refreshing auth scopes...\n');
+      const refreshProc = Bun.spawn(['gh', 'auth', 'refresh', '-s', 'repo,workflow'], {
+        stdin: 'inherit',
+        stdout: 'inherit',
+        stderr: 'inherit',
+      });
+      await refreshProc.exited;
+      const recheck = await checkGhAuth();
+      Object.assign(auth, recheck);
+    }
   }
 
-  if (auth.authenticated && auth.missingScopes.length === 0) {
+  if (auth.authenticated) {
     const username = auth.username || await getGhUsername() || '';
-    console.log(`✅ Authenticated as ${username} (scopes: ${auth.scopes.join(', ')})`);
+    if (auth.missingScopes.length === 0) {
+      console.log(`✅ Authenticated as ${username} (scopes: ${auth.scopes.join(', ')})`);
+    } else {
+      console.log(`⚠️  Authenticated as ${username} (limited scopes: ${auth.scopes.join(', ') || 'none'})`);
+    }
 
     const configDir = getConfigDir();
 
