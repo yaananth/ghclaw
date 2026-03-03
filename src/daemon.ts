@@ -329,10 +329,41 @@ async function main() {
   }
 
   // Main polling loop
+  let followerRetryCount = 0;
   while (isRunning) {
     if (!isLeader) {
-      // Follower mode: just wait for handoff signal via sync loop
-      await sleep(5000);
+      // Follower mode: periodically try to poll to detect dead leader
+      // Wait longer between retries (30s) so we're not hammering
+      followerRetryCount++;
+      if (followerRetryCount < 6) {
+        // First 30s: just wait for handoff via sync loop
+        await sleep(5000);
+        continue;
+      }
+      // Every 30s: try to poll — if leader is dead we'll succeed and claim leadership
+      followerRetryCount = 0;
+      try {
+        const messages = await channel.poll(1); // Short timeout (1s) — just testing
+        // No 409 → old leader is gone, we're the new leader
+        console.log('👑 Leader appears gone (poll succeeded) — claiming leadership');
+        isLeader = true;
+        // Claim in sync repo too
+        if (config.github.enabled && config.github.syncEnabled) {
+          writeLeaderClaim(config.github.repoPath, config.machine.id, config.machine.name);
+        }
+        // Process any messages we got from the probe
+        for (const message of messages) {
+          await processMessage(channel, channelConfig.type, message, security, config);
+        }
+      } catch (error) {
+        const errMsg = String(error);
+        if (errMsg.includes('Conflict') || errMsg.includes('409') || errMsg.includes('terminated by other')) {
+          // Leader is still alive — stay as follower
+        } else {
+          // Some other error (network, etc.) — stay as follower, don't spam
+          console.log(`⚠️ Follower probe error: ${errMsg.slice(0, 100)}`);
+        }
+      }
       continue;
     }
 
@@ -349,6 +380,7 @@ async function main() {
         // Another instance is polling — yield leadership
         console.log('⚠️  Another instance is polling this bot. Yielding to follower mode...');
         isLeader = false;
+        followerRetryCount = 0;
       } else {
         console.error('❌ Polling error:', error);
         await sleep(config.telegram.pollIntervalMs * 5);
