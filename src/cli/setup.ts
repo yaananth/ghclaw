@@ -485,16 +485,33 @@ export async function runSetup(): Promise<void> {
 
   if (auth.authenticated && auth.missingScopes.length > 0) {
     if (hasGithubTokenEnv) {
-      // GITHUB_TOKEN env var overrides gh CLI auth — can't refresh scopes
+      // GITHUB_TOKEN env var overrides gh CLI auth — temporarily unset and re-auth
       console.log(`⚠️  Missing scopes: ${auth.missingScopes.join(', ')}`);
-      console.log('   GITHUB_TOKEN env var is set (common in Codespaces) with limited scopes.');
-      console.log('   gh auth refresh cannot override it.\n');
-      console.log('   To fix, run:');
-      console.log('     unset GITHUB_TOKEN');
-      console.log('     gh auth login -s repo,workflow');
-      console.log('   Then re-run: ghclaw setup\n');
-      console.log('   Continuing with limited GitHub features...\n');
-      // Still try to proceed — repo detection may work even with limited scopes
+      console.log('   GITHUB_TOKEN env var detected (Codespaces) — temporarily unsetting to authenticate properly...\n');
+      const savedToken = process.env.GITHUB_TOKEN;
+      delete process.env.GITHUB_TOKEN;
+
+      // Check if there's already a proper gh auth behind the env var
+      const behindAuth = await checkGhAuth();
+      if (behindAuth.authenticated && behindAuth.missingScopes.length === 0) {
+        console.log('   ✅ Found existing gh auth with proper scopes');
+        Object.assign(auth, behindAuth);
+      } else {
+        // Need to login fresh
+        console.log('   Running: gh auth login\n');
+        const loginProc = Bun.spawn(['gh', 'auth', 'login', '-s', 'repo,workflow'], {
+          stdin: 'inherit',
+          stdout: 'inherit',
+          stderr: 'inherit',
+          env: { ...process.env }, // env without GITHUB_TOKEN
+        });
+        await loginProc.exited;
+        const recheck = await checkGhAuth();
+        Object.assign(auth, recheck);
+      }
+
+      // Keep GITHUB_TOKEN unset for the rest of setup so gh uses proper auth
+      // (don't restore — the Codespace token is too limited)
     } else {
       console.log(`⚠️  Missing scopes: ${auth.missingScopes.join(', ')}`);
       console.log('   Refreshing auth scopes...\n');
