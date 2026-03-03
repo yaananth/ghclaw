@@ -59,9 +59,21 @@ export function getPlatform(): 'macos' | 'linux' | 'windows' | 'unknown' {
   return 'unknown';
 }
 
-/** Detect if running inside a Codespace or container without keychain */
+/** Detect if running inside a GitHub Codespace */
 export function isCodespace(): boolean {
-  return !!(process.env.CODESPACES || process.env.CODESPACE_NAME);
+  return process.env.CODESPACES === 'true';
+}
+
+/**
+ * Check if gh CLI is authenticated (needed for Codespace secrets)
+ */
+export async function isGhAuthenticated(): Promise<boolean> {
+  try {
+    const proc = Bun.spawn(['gh', 'auth', 'status'], { stdout: 'pipe', stderr: 'pipe' });
+    return (await proc.exited) === 0;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -119,18 +131,44 @@ export async function isNativeKeychainAvailable(): Promise<boolean> {
 }
 
 /**
- * Store a secret — native keychain if available, else set process.env for current session.
- * In Codespaces, secrets should be set via `gh secret set` (encrypted at rest).
+ * Store a secret — native keychain, Codespace secrets, or process.env fallback.
  */
 export async function setSecret(key: string, value: string): Promise<boolean> {
   validateKeyName(key);
 
+  // Native OS keychain (macOS, Linux with libsecret, Windows)
   if (await isNativeKeychainAvailable()) {
     return nativeSetSecret(key, value);
   }
 
-  // No native keychain — store in process.env for current session
-  // (Codespaces should use `gh secret set` for persistence)
+  // Codespace: use `gh secret set` for encrypted persistence + set env for current session
+  if (isCodespace()) {
+    const envVar = KEY_TO_ENV[key];
+    if (envVar) {
+      // Set for current session immediately
+      process.env[envVar] = value;
+      // Persist as Codespace secret (encrypted at rest, auto-injected on rebuild)
+      const repo = process.env.GITHUB_REPOSITORY || '';
+      const args = ['gh', 'secret', 'set', envVar, '--user', '--body', value];
+      if (repo) args.push('--repos', repo);
+      try {
+        const proc = Bun.spawn(args, { stdout: 'pipe', stderr: 'pipe' });
+        const exit = await proc.exited;
+        if (exit === 0) return true;
+        // If gh secret set fails, env var is still set for current session
+        const stderr = await new Response(proc.stderr).text();
+        console.log(`   ⚠️  Codespace secret persistence failed: ${stderr.trim()}`);
+        console.log(`   ℹ️  Secret set for current session. Manually persist:`);
+        console.log(`      gh secret set ${envVar} --user${repo ? ` --repos ${repo}` : ''}`);
+        return true; // env var still works for this session
+      } catch {
+        return true; // env var still works
+      }
+    }
+    return false;
+  }
+
+  // Bare fallback: process.env only (no persistence)
   const envVar = KEY_TO_ENV[key];
   if (envVar) {
     process.env[envVar] = value;
@@ -330,7 +368,7 @@ export async function getStorageBackend(): Promise<string> {
     if (platform === 'linux') return 'GNOME Keyring (libsecret)';
     if (platform === 'windows') return 'Windows Credential Manager';
   }
-  if (isCodespace()) return 'Codespace Secrets (env vars)';
+  if (isCodespace()) return 'Codespace Secrets (gh secret set)';
   return 'Environment variables';
 }
 
