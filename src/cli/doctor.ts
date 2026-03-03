@@ -478,7 +478,11 @@ async function checkGithubIntegration(autoFix = false): Promise<DiagnosticResult
     try {
       const secretListProc = Bun.spawn(
         ['gh', 'secret', 'list', '-R', `${config.github.username}/${config.github.repoName}`],
-        { stdout: 'pipe', stderr: 'pipe' }
+        { stdout: 'pipe', stderr: 'pipe',
+          env: process.env.CODESPACES === 'true'
+            ? Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'GITHUB_TOKEN') as [string, string][])
+            : undefined,
+        }
       );
       const secretListExit = await secretListProc.exited;
       const secretListOut = await new Response(secretListProc.stdout).text();
