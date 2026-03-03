@@ -433,6 +433,7 @@ export async function runSetup(): Promise<void> {
         const pushProc = Bun.spawn(['git', 'push', '--dry-run'], {
           cwd: existingConfig.github.repoPath,
           stdout: 'pipe', stderr: 'pipe',
+          ...(process.env.CODESPACES === 'true' ? { env: Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'GITHUB_TOKEN') as [string, string][]) } : {}),
         });
         const pushExit = await pushProc.exited;
         if (pushExit === 0) {
@@ -461,7 +462,8 @@ export async function runSetup(): Promise<void> {
   // In Codespaces, GITHUB_TOKEN is auto-set with limited scopes.
   // gh CLI API calls (repo view, api) prefer GITHUB_TOKEN over stored auth,
   // so we must clear it upfront to use the proper user auth.
-  const hasGithubTokenEnv = !!process.env.GITHUB_TOKEN;
+  const isInCodespace = process.env.CODESPACES === 'true';
+  const hasGithubTokenEnv = isInCodespace && !!process.env.GITHUB_TOKEN;
   if (hasGithubTokenEnv) {
     process.env.GITHUB_TOKEN = '';
   }
@@ -630,7 +632,7 @@ export async function runSetup(): Promise<void> {
           cwd: repoPath,
           stdout: 'pipe',
           stderr: 'pipe',
-          env: Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'GITHUB_TOKEN') as [string, string][]),
+          env: process.env.CODESPACES === 'true' ? Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'GITHUB_TOKEN') as [string, string][]) : undefined,
         });
         const pushExit = await pushProc.exited;
         if (pushExit === 0) {

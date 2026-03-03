@@ -434,11 +434,14 @@ async function checkGithubIntegration(autoFix = false): Promise<DiagnosticResult
       try {
         await fixGitCredentialHelper(config.github.repoPath);
         // Pull first to avoid "rejected: fetch first" false positive
+        const codespaceEnv = process.env.CODESPACES === 'true'
+          ? Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'GITHUB_TOKEN') as [string, string][])
+          : undefined;
         const pullProc = Bun.spawn(['git', 'pull', '--rebase', '--quiet'], {
           cwd: config.github.repoPath,
           stdout: 'pipe',
           stderr: 'pipe',
-          env: Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'GITHUB_TOKEN') as [string, string][]),
+          env: codespaceEnv,
         });
         await pullProc.exited;
 
@@ -446,7 +449,7 @@ async function checkGithubIntegration(autoFix = false): Promise<DiagnosticResult
           cwd: config.github.repoPath,
           stdout: 'pipe',
           stderr: 'pipe',
-          env: Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'GITHUB_TOKEN') as [string, string][]),
+          env: codespaceEnv,
         });
         const pushExit = await pushProc.exited;
         const pushStderr = (await new Response(pushProc.stderr).text()).trim();

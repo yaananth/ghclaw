@@ -8,13 +8,15 @@ import * as path from 'path';
 import { getGhToken } from './auth';
 
 /**
- * Build a clean env for gh CLI calls, ensuring GITHUB_TOKEN doesn't interfere.
- * In Codespaces, GITHUB_TOKEN is auto-set with limited scopes and overrides stored auth.
+ * Build env for gh/git CLI calls.
+ * In Codespaces (CODESPACES=true), strips GITHUB_TOKEN which has limited scopes
+ * and overrides stored user auth. Outside Codespaces, returns process.env as-is.
  */
-function cleanGhEnv(): Record<string, string> {
+function cleanGhEnv(): Record<string, string> | undefined {
+  if (process.env.CODESPACES !== 'true') return undefined; // use default env
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(process.env)) {
-    if (k === 'GITHUB_TOKEN') continue; // exclude entirely
+    if (k === 'GITHUB_TOKEN') continue;
     if (v !== undefined) env[k] = v;
   }
   return env;
@@ -123,6 +125,9 @@ export async function cloneRepo(username: string, localPath: string, repoName: s
  * Replace remote URL with token-authenticated URL using gh auth token.
  */
 export async function fixGitCredentialHelper(repoPath: string): Promise<void> {
+  // Only needed in Codespaces where the credential helper returns a limited token
+  if (process.env.CODESPACES !== 'true') return;
+
   // Check if current remote uses github.com https
   const proc = Bun.spawn(['git', 'remote', 'get-url', 'origin'], {
     stdout: 'pipe',
