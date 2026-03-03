@@ -347,19 +347,9 @@ async function main() {
       try {
         const messages = await channel.poll(1); // 1s timeout — just testing
 
-        // Empty poll can succeed during leader's brief gap between calls
-        // This is NOT evidence the leader is dead — skip
-        if (messages.length === 0) {
-          continue;
-        }
-
-        // Non-empty poll = Telegram delivered messages to us = leader is truly gone
-        // (If leader was alive & polling, Telegram would give us 409 or give messages to them)
-        // Edge case: leader could be between polls (processing a batch). In that case:
-        // - We claim leadership and process the messages (no loss)
-        // - Leader gets 409 on its next poll and yields (brief overlap, converges fast)
-        // This is acceptable: no messages lost, brief overlap resolves in one poll cycle
-        console.log(`👑 Leader gone (probe got ${messages.length} msg) — claiming leadership`);
+        // Success (no 409) = no other instance is polling = claim leadership
+        // If leader were alive, Telegram would reject us with 409
+        console.log(`👑 Leader gone (probe succeeded, ${messages.length} msg) — claiming leadership`);
         isLeader = true;
         if (config.github.enabled && config.github.syncEnabled) {
           writeLeaderClaim(config.github.repoPath, config.machine.id, config.machine.name);
