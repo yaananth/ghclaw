@@ -37,7 +37,7 @@ import {
 import { isChronicleAvailable, getChronicleStats, getRecentSessions as getChronicleRecentSessions } from './copilot/chronicle';
 import { parseActionBlocks, executeAction } from './actions';
 import { getGhToken } from './github/auth';
-import { startSyncLoop, writeLeaderClaim, writeHandoffRequest, readLeaderClaim } from './github/sync';
+import { startSyncLoop, writeLeaderClaim, writeHandoffRequest, readLeaderClaim, lookupSessionOwner } from './github/sync';
 import { getVersion, getCommitHash } from './version';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -568,10 +568,27 @@ async function processMessageInner(
     sessionId = session.id;
     sessionName = session.name;
 
+    // Cross-machine ownership check: local SQLite only knows about THIS machine's sessions.
+    // When a topic was created by another machine (e.g., Codespace), our local DB won't have it,
+    // so getOrCreateSession creates a new row with OUR machine_id. Check the shared sync repo
+    // (sessions.json) for the real owner before deciding whether to handoff.
+    let effectiveMachineId = session.machine_id;
+    let effectiveMachineName = session.machine_name;
+    if (config.github.enabled && config.github.syncEnabled) {
+      if (!effectiveMachineId || effectiveMachineId === config.machine.id) {
+        const repoOwner = lookupSessionOwner(config.github.repoPath, chatIdNum, threadIdNum, config.machine.id);
+        if (repoOwner && repoOwner.machine_id !== config.machine.id) {
+          effectiveMachineId = repoOwner.machine_id;
+          effectiveMachineName = repoOwner.machine_name;
+          console.log(`🔍 [${sessionName}] Sync repo says owner is ${effectiveMachineName} (${effectiveMachineId.slice(0, 8)}), not us`);
+        }
+      }
+    }
+
     // Soft-route: if session belongs to a different machine, trigger handoff
-    if (session.machine_id && session.machine_id !== config.machine.id) {
-      const targetName = session.machine_name || 'another machine';
-      const targetId = session.machine_id;
+    if (effectiveMachineId && effectiveMachineId !== config.machine.id) {
+      const targetName = effectiveMachineName || 'another machine';
+      const targetId = effectiveMachineId;
 
       // If GitHub sync is enabled, trigger a leader handoff
       if (config.github.enabled && config.github.syncEnabled) {

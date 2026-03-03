@@ -134,8 +134,11 @@ export function exportSessionsToJson(repoPath: string, sessions: TelegramSession
   fs.mkdirSync(path.dirname(sessionsPath), { recursive: true });
 
   // Build session data WITHOUT volatile timestamps (exportedAt changes every cycle)
+  // Include chat_id/thread_id so other machines can look up session ownership
   const sessionData = sessions.map(s => ({
     id: s.id,
+    chat_id: s.chat_id,
+    thread_id: s.thread_id,
     name: s.name,
     status: s.status,
     created_at: s.created_at,
@@ -180,8 +183,11 @@ export function exportMachineInfo(
   fs.mkdirSync(path.dirname(machinePath), { recursive: true });
 
   // Build session data WITHOUT volatile timestamp
+  // Include chat_id/thread_id so other machines can look up session ownership
   const sessionData = sessions.map(s => ({
     id: s.id,
+    chat_id: s.chat_id,
+    thread_id: s.thread_id,
     name: s.name,
     last_activity: s.last_activity,
     message_count: s.message_count,
@@ -214,6 +220,46 @@ export function exportMachineInfo(
 
   fs.writeFileSync(machinePath, JSON.stringify(data, null, 2));
   return true;
+}
+
+/**
+ * Look up session ownership from the shared sync repo.
+ * Each machine has its own local SQLite, so when a message arrives for a topic
+ * created by another machine, the local DB won't have the machine_id.
+ * Checks per-machine files (memory/machines/{id}.json) which each machine exports
+ * from its own local data — more reliable than sessions.json which gets overwritten.
+ */
+export function lookupSessionOwner(
+  repoPath: string,
+  chatId: number,
+  threadId: number,
+  excludeMachineId?: string
+): { machine_id: string; machine_name: string } | null {
+  const machinesDir = path.join(repoPath, 'memory', 'machines');
+  if (!fs.existsSync(machinesDir)) return null;
+
+  try {
+    const files = fs.readdirSync(machinesDir).filter(f => f.endsWith('.json'));
+    for (const file of files) {
+      const machineId = file.replace('.json', '');
+      if (excludeMachineId && machineId === excludeMachineId) continue; // Skip our own
+
+      try {
+        const data = JSON.parse(fs.readFileSync(path.join(machinesDir, file), 'utf-8'));
+        if (!data.sessions) continue;
+        for (const s of data.sessions) {
+          if (s.chat_id === chatId && s.thread_id === threadId) {
+            return { machine_id: data.machineId || machineId, machine_name: data.machineName || 'unknown' };
+          }
+        }
+      } catch {
+        // Skip corrupt files
+      }
+    }
+  } catch {
+    // Directory read error
+  }
+  return null;
 }
 
 /**
