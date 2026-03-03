@@ -11,6 +11,9 @@ import {
   setSecret,
   getSecret,
   isKeychainAvailable,
+  isNativeKeychainAvailable,
+  isCodespace,
+  getStorageBackend,
   getPlatform,
 } from '../secrets/keychain';
 import { getConfigDir, getConfigAsync, saveLocalConfig } from '../config';
@@ -29,22 +32,20 @@ export async function runSetup(): Promise<void> {
 `);
 
   const platform = getPlatform();
-  const keychainAvailable = await isKeychainAvailable();
+  const nativeKeychain = await isNativeKeychainAvailable();
+  const storageBackend = await getStorageBackend();
 
   console.log(`Platform: ${platform}`);
-  console.log(`Keychain: ${keychainAvailable ? '✅ Available' : '❌ Not available'}\n`);
+  console.log(`Secrets: ${storageBackend}${!nativeKeychain ? ' (no OS keychain)' : ''}\n`);
 
-  if (!keychainAvailable) {
-    console.log('❌ OS keychain is required for secure secret storage.');
-    console.log('   Secrets cannot be stored without it.\n');
-    console.log('   Alternatives:');
-    console.log('   - macOS: Keychain Access should be available by default');
-    console.log('   - Linux: Install libsecret (e.g., apt install libsecret-1-0)');
-    console.log('   - Set environment variables as fallback:');
-    console.log('     export TELEGRAM_BOT_TOKEN="your-token"');
-    console.log('     export TELEGRAM_ALLOWED_GROUP_ID="your-group-id"');
-    console.log('     export TELEGRAM_ALLOWED_USER_IDS="your-user-id"\n');
-    return;
+  if (!nativeKeychain && isCodespace()) {
+    console.log('  Running in Codespace — secrets stored in env vars for this session.');
+    console.log('  For persistence across rebuilds, set Codespace secrets:');
+    console.log('    gh secret set TELEGRAM_BOT_TOKEN --user');
+    console.log('    gh secret set TELEGRAM_ALLOWED_GROUP_ID --user\n');
+  } else if (!nativeKeychain) {
+    console.log('  No OS keychain available. Secrets stored in env vars for this session.');
+    console.log('  For persistence, export env vars in your shell profile.\n');
   }
 
   // Channel detection: detect which channels are already configured
@@ -117,10 +118,8 @@ export async function runSetup(): Promise<void> {
     botUsername = valid;
     console.log(`✅ Connected as @${botUsername}\n`);
 
-    if (keychainAvailable) {
-      await setSecret('telegram-bot-token', token);
-      console.log('✅ Token saved to keychain\n');
-    }
+    await setSecret('telegram-bot-token', token);
+    console.log(`✅ Token saved${nativeKeychain ? ' to keychain' : ''}\n`);
   }
 
   // Step 2: Group ID
@@ -314,7 +313,7 @@ export async function runSetup(): Promise<void> {
       const targetGroupId = groupId ? parseInt(groupId) : undefined;
       const detected = await detectUser(client, targetGroupId);
 
-      if (detected && keychainAvailable) {
+      if (detected) {
         userIds = detected.userId.toString();
         await setSecret('telegram-allowed-users', userIds);
         console.log(`✅ User ID ${userIds} saved (only you can use the bot)`);
@@ -339,7 +338,7 @@ export async function runSetup(): Promise<void> {
           },
         }]);
 
-        if (manualId && manualId.trim() && keychainAvailable) {
+        if (manualId && manualId.trim()) {
           userIds = manualId.trim();
           await setSecret('telegram-allowed-users', userIds);
           console.log(`✅ User ID ${userIds} saved\n`);

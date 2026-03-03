@@ -1,6 +1,7 @@
 /**
  * Secrets Management
  * Uses OS keychain for secure credential storage
+ * Falls back to environment variables in Codespaces/containers
  *
  * Security: Uses secure input methods, avoids shell history exposure
  */
@@ -31,16 +32,21 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, errorMsg: string)
 
 export interface SecretKey {
   name: string;
+  envVar: string; // Corresponding environment variable name
   description: string;
   required: boolean;
 }
 
 export const SECRETS: SecretKey[] = [
-  { name: 'telegram-bot-token', description: 'Telegram Bot Token', required: true },
-  { name: 'telegram-allowed-group', description: 'Allowed Group ID', required: false },
-  { name: 'telegram-allowed-users', description: 'Allowed User IDs', required: false },
-  { name: 'telegram-secret-prefix', description: 'Secret Prefix', required: false },
+  { name: 'telegram-bot-token', envVar: 'TELEGRAM_BOT_TOKEN', description: 'Telegram Bot Token', required: true },
+  { name: 'telegram-allowed-group', envVar: 'TELEGRAM_ALLOWED_GROUP_ID', description: 'Allowed Group ID', required: false },
+  { name: 'telegram-allowed-users', envVar: 'TELEGRAM_ALLOWED_USER_IDS', description: 'Allowed User IDs', required: false },
+  { name: 'telegram-secret-prefix', envVar: 'TELEGRAM_SECRET_PREFIX', description: 'Secret Prefix', required: false },
 ];
+
+/** Map from secret key name to env var name */
+const KEY_TO_ENV: Record<string, string> = {};
+for (const s of SECRETS) KEY_TO_ENV[s.name] = s.envVar;
 
 /**
  * Detect the current platform
@@ -53,6 +59,11 @@ export function getPlatform(): 'macos' | 'linux' | 'windows' | 'unknown' {
   return 'unknown';
 }
 
+/** Detect if running inside a Codespace or container without keychain */
+export function isCodespace(): boolean {
+  return !!(process.env.CODESPACES || process.env.CODESPACE_NAME);
+}
+
 /**
  * Validate key names to prevent injection.
  * Only allows alphanumeric, hyphens, and underscores.
@@ -63,12 +74,72 @@ function validateKeyName(key: string): void {
   }
 }
 
+/** Cached result of native keychain check */
+let _nativeKeychainAvailable: boolean | null = null;
+
 /**
- * Store a secret in the OS keychain
- * Security: Uses direct args (no shell) and stdin where possible to avoid ps exposure
+ * Check if native OS keychain is available and functional
+ */
+export async function isNativeKeychainAvailable(): Promise<boolean> {
+  if (_nativeKeychainAvailable !== null) return _nativeKeychainAvailable;
+  const platform = getPlatform();
+
+  try {
+    switch (platform) {
+      case 'macos': {
+        const macProc = Bun.spawn(['which', 'security'], { stdout: 'ignore' });
+        _nativeKeychainAvailable = (await macProc.exited) === 0;
+        return _nativeKeychainAvailable;
+      }
+      case 'linux': {
+        const whichProc = Bun.spawn(['which', 'secret-tool'], { stdout: 'ignore', stderr: 'ignore' });
+        if ((await whichProc.exited) !== 0) { _nativeKeychainAvailable = false; return false; }
+        const testProc = Bun.spawn(
+          ['secret-tool', 'lookup', 'service', 'ghclaw-test', 'account', 'test'],
+          { stdout: 'ignore', stderr: 'pipe' }
+        );
+        const timeoutPromise = new Promise<number>((resolve) => setTimeout(() => resolve(-1), 2000));
+        const exitCode = await Promise.race([testProc.exited, timeoutPromise]);
+        _nativeKeychainAvailable = exitCode === 0 || exitCode === 1;
+        return _nativeKeychainAvailable;
+      }
+      case 'windows': {
+        const winProc = Bun.spawn(['where', 'cmdkey'], { stdout: 'ignore' });
+        _nativeKeychainAvailable = (await winProc.exited) === 0;
+        return _nativeKeychainAvailable;
+      }
+      default:
+        _nativeKeychainAvailable = false;
+        return false;
+    }
+  } catch {
+    _nativeKeychainAvailable = false;
+    return false;
+  }
+}
+
+/**
+ * Store a secret — native keychain if available, else set process.env for current session.
+ * In Codespaces, secrets should be set via `gh secret set` (encrypted at rest).
  */
 export async function setSecret(key: string, value: string): Promise<boolean> {
   validateKeyName(key);
+
+  if (await isNativeKeychainAvailable()) {
+    return nativeSetSecret(key, value);
+  }
+
+  // No native keychain — store in process.env for current session
+  // (Codespaces should use `gh secret set` for persistence)
+  const envVar = KEY_TO_ENV[key];
+  if (envVar) {
+    process.env[envVar] = value;
+    return true;
+  }
+  return false;
+}
+
+async function nativeSetSecret(key: string, value: string): Promise<boolean> {
   const platform = getPlatform();
 
   try {
@@ -82,7 +153,6 @@ export async function setSecret(key: string, value: string): Promise<boolean> {
         await withTimeout(delProc.exited, 5000, 'Delete timed out');
 
         // Pass password as -w argument directly
-        // Note: -w without a value triggers interactive prompt which breaks stdin piping
         const addProc = Bun.spawn(
           ['security', 'add-generic-password', '-s', SERVICE_NAME, '-a', key, '-w', value],
           { stdin: 'ignore', stdout: 'ignore', stderr: 'ignore' }
@@ -120,7 +190,6 @@ export async function setSecret(key: string, value: string): Promise<boolean> {
       }
 
       default:
-        console.warn('⚠️ Keychain not supported on this platform.');
         return false;
     }
   } catch (error) {
@@ -130,10 +199,27 @@ export async function setSecret(key: string, value: string): Promise<boolean> {
 }
 
 /**
- * Retrieve a secret from the OS keychain
+ * Retrieve a secret — tries native keychain first, then environment variables
  */
 export async function getSecret(key: string): Promise<string | null> {
   validateKeyName(key);
+
+  // Try native keychain first
+  if (await isNativeKeychainAvailable()) {
+    const result = await nativeGetSecret(key);
+    if (result) return result;
+  }
+
+  // Fall back to environment variable
+  const envVar = KEY_TO_ENV[key];
+  if (envVar && process.env[envVar]) {
+    return process.env[envVar]!;
+  }
+
+  return null;
+}
+
+async function nativeGetSecret(key: string): Promise<string | null> {
   const platform = getPlatform();
 
   try {
@@ -157,7 +243,6 @@ export async function getSecret(key: string): Promise<string | null> {
         return (await new Response(linuxProc.stdout).text()).trim() || null;
 
       case 'windows':
-        // Windows credential retrieval is complex, simplified version
         const winProc = Bun.spawn(
           ['powershell', '-Command', `(cmdkey /list:${SERVICE_NAME}:${key} | Select-String 'User:').ToString().Split(':')[1].Trim()`],
           { stdout: 'pipe', stderr: 'ignore' }
@@ -216,83 +301,37 @@ export async function deleteSecret(key: string): Promise<boolean> {
  * List all stored secrets (keys only, not values)
  */
 export async function listSecrets(): Promise<string[]> {
-  const platform = getPlatform();
   const keys: string[] = [];
 
-  try {
-    switch (platform) {
-      case 'macos':
-        // Use security find-generic-password for each known key
-        for (const secret of SECRETS) {
-          const val = await getSecret(secret.name);
-          if (val) keys.push(secret.name);
-        }
-        break;
-
-      case 'linux':
-        for (const secret of SECRETS) {
-          const val = await getSecret(secret.name);
-          if (val) keys.push(secret.name);
-        }
-        break;
-
-      case 'windows':
-        for (const secret of SECRETS) {
-          const val = await getSecret(secret.name);
-          if (val) keys.push(secret.name);
-        }
-        break;
-    }
-  } catch {
-    // Ignore errors in listing
+  for (const secret of SECRETS) {
+    const val = await getSecret(secret.name);
+    if (val) keys.push(secret.name);
   }
 
   return keys;
 }
 
 /**
- * Check if keychain is available on this system
- * For Linux, also checks if a keyring daemon is running
+ * Check if secret storage is available
+ * Always true — native keychain on macOS/Linux with libsecret,
+ * environment variables everywhere else (Codespaces, containers)
  */
 export async function isKeychainAvailable(): Promise<boolean> {
-  const platform = getPlatform();
+  return true;
+}
 
-  try {
-    switch (platform) {
-      case 'macos':
-        const macProc = Bun.spawn(['which', 'security'], { stdout: 'ignore' });
-        return (await macProc.exited) === 0;
-
-      case 'linux':
-        // Check if secret-tool exists
-        const whichProc = Bun.spawn(['which', 'secret-tool'], { stdout: 'ignore', stderr: 'ignore' });
-        if ((await whichProc.exited) !== 0) return false;
-
-        // Also check if a keyring daemon is running (needed for secret-tool to work)
-        // In Codespaces/containers, there's typically no keyring daemon
-        const testProc = Bun.spawn(
-          ['secret-tool', 'lookup', 'service', 'ghclaw-test', 'account', 'test'],
-          { stdout: 'ignore', stderr: 'pipe' }
-        );
-
-        // Use a short timeout - if it hangs, keyring isn't available
-        const timeoutPromise = new Promise<number>((resolve) => setTimeout(() => resolve(-1), 2000));
-        const exitCode = await Promise.race([testProc.exited, timeoutPromise]);
-
-        // Exit code 1 is OK (just means key not found), -1 means timeout (no daemon)
-        // Exit code 0 would also be OK (found the test key)
-        return exitCode === 0 || exitCode === 1;
-
-      case 'windows':
-        const winProc = Bun.spawn(['where', 'cmdkey'], { stdout: 'ignore' });
-        return (await winProc.exited) === 0;
-
-      default:
-        return false;
-    }
-  } catch {
-    return false;
+/**
+ * Get the storage backend description for display
+ */
+export async function getStorageBackend(): Promise<string> {
+  if (await isNativeKeychainAvailable()) {
+    const platform = getPlatform();
+    if (platform === 'macos') return 'macOS Keychain';
+    if (platform === 'linux') return 'GNOME Keyring (libsecret)';
+    if (platform === 'windows') return 'Windows Credential Manager';
   }
+  if (isCodespace()) return 'Codespace Secrets (env vars)';
+  return 'Environment variables';
 }
 
 /**
@@ -379,6 +418,11 @@ secret-tool store --label="ghclaw: telegram-bot-token" service ghclaw account te
 
 ## Retrieve a secret:
 secret-tool lookup service ghclaw account telegram-bot-token
+
+## In Codespaces (no keychain):
+# Set Codespace secrets (encrypted at rest, injected as env vars):
+gh secret set TELEGRAM_BOT_TOKEN --user
+gh secret set TELEGRAM_ALLOWED_GROUP_ID --user
 `,
     windows: `
 # Windows Credential Manager
@@ -394,12 +438,12 @@ ghclaw setup
 5. Password: your token
 `,
     unknown: `
-# Manual Configuration (Fallback)
+# Environment Variables (Fallback)
 
-Create a secure config file:
-1. mkdir -p ~/.ghclaw && chmod 700 ~/.ghclaw
-2. Create ~/.ghclaw/secrets.json with mode 600
-3. Add: {"telegram-bot-token": "YOUR_TOKEN"}
+Set these environment variables:
+export TELEGRAM_BOT_TOKEN="your-token"
+export TELEGRAM_ALLOWED_GROUP_ID="your-group-id"
+export TELEGRAM_ALLOWED_USER_IDS="your-user-id"
 `,
   };
 
