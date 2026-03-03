@@ -8,7 +8,7 @@ import { getSecret, listSecrets, isKeychainAvailable } from '../secrets/keychain
 import { TelegramClient } from '../telegram/client';
 import { getSecuritySetupInstructions } from '../telegram/security';
 import { checkGhAuth as checkGhAuthStatus, getGhToken, getGhScopes } from '../github/auth';
-import { checkRepoExists } from '../github/repo';
+import { checkRepoExists, fixGitCredentialHelper } from '../github/repo';
 import { getSyncState } from '../github/sync';
 
 export interface DiagnosticResult {
@@ -432,6 +432,7 @@ async function checkGithubIntegration(autoFix = false): Promise<DiagnosticResult
     // Verify push access by doing a dry-run
     if (cloneExists) {
       try {
+        await fixGitCredentialHelper(config.github.repoPath);
         const pushProc = Bun.spawn(['git', 'push', '--dry-run'], {
           cwd: config.github.repoPath,
           stdout: 'pipe',

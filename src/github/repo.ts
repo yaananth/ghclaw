@@ -122,7 +122,7 @@ export async function cloneRepo(username: string, localPath: string, repoName: s
  * The Codespace-provided credential helper returns a limited GITHUB_TOKEN.
  * Override it to use `gh auth token` which has proper user scopes.
  */
-async function fixGitCredentialHelper(repoPath: string): Promise<void> {
+export async function fixGitCredentialHelper(repoPath: string): Promise<void> {
   // Only needed when the Codespace credential helper is active
   const proc = Bun.spawn(['git', 'config', 'credential.helper'], {
     stdout: 'pipe',
@@ -266,6 +266,7 @@ export async function setRepoSecrets(
  * Pull latest changes from remote
  */
 export async function gitPull(repoPath: string): Promise<boolean> {
+  await fixGitCredentialHelper(repoPath);
   const proc = Bun.spawn(['git', 'pull', '--rebase', '--quiet'], {
     stdout: 'pipe',
     stderr: 'pipe',
@@ -281,6 +282,7 @@ export async function gitPull(repoPath: string): Promise<boolean> {
  */
 export async function gitCommitAndPush(repoPath: string, message: string): Promise<boolean> {
   if (!(await hasChanges(repoPath))) return false;
+  await fixGitCredentialHelper(repoPath);
 
   // Stage only known managed paths (avoid staging unexpected files)
   const add = Bun.spawn(['git', 'add', 'memory/', '.github/workflows/', 'README.md'], {
