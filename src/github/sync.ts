@@ -271,6 +271,8 @@ export async function startSyncLoop(
   console.log(`🔄 Starting GitHub sync (every ${config.github.syncIntervalMs / 1000}s)...`);
 
   let firstRun = true;
+  let lastLeaderRefresh = 0;
+  const LEADER_REFRESH_MS = 30_000; // Refresh leader.json every 30s (heartbeat for stale detection)
   while (isRunning()) {
     try {
       // Pull first
@@ -301,12 +303,15 @@ export async function startSyncLoop(
         }
       }
 
-      // Note: we do NOT yield based on leader.json here.
-      // leader.json can be stale from a previous run of another machine.
-      // The ONLY reasons to yield are:
-      //   1. Telegram 409 (another instance is actually polling right now)
-      //   2. Explicit handoff request (this machine wrote handoff.json and is waiting)
-      // leader.json is used for handoff targeting only, not for yield decisions.
+      // Refresh leader.json timestamp if we're the leader (heartbeat for stale detection).
+      // Only refresh every 30s to avoid committing every 5s cycle.
+      const currentLeader = readLeaderClaim(repoPath);
+      if (currentLeader && currentLeader.machine_id === config.machine.id) {
+        if (Date.now() - lastLeaderRefresh > LEADER_REFRESH_MS) {
+          writeLeaderClaim(repoPath, config.machine.id, config.machine.name);
+          lastLeaderRefresh = Date.now();
+        }
+      }
 
       // Export local data (only writes files if data actually changed)
       const allSessions = getActiveSessions(100);
@@ -315,8 +320,8 @@ export async function startSyncLoop(
       const machineSessions = getSessionsByMachine(config.machine.id);
       const machineChanged = exportMachineInfo(repoPath, config.machine.id, config.machine.name, machineSessions);
 
-      // Only commit+push if something meaningful changed (avoids hammering on every cycle)
-      if ((sessionsChanged || machineChanged) && await hasChanges(repoPath)) {
+      // Commit+push if session data changed OR leader.json was refreshed (heartbeat)
+      if (await hasChanges(repoPath)) {
         const pushed = await gitCommitAndPush(repoPath, `sync: ${config.machine.name} @ ${new Date().toISOString()}`);
         if (pushed) {
           syncState.syncCount++;

@@ -330,12 +330,17 @@ async function main() {
   }
 
   // Main polling loop
-  let followerProbeCount = 0;  // Counts cycles since last probe
-  // Jitter: randomize probe interval so multiple followers don't probe simultaneously
-  const probeIntervalCycles = 6 + Math.floor(Math.random() * 4); // 30-50s (6-10 × 5s)
+  // Leadership is determined by leader.json (source of truth), NOT by Telegram 409.
+  // - On start: write leader.json with self, start as leader
+  // - 409: become follower (don't touch leader.json — someone else owns it)
+  // - Follower probe succeeds: check leader.json — only claim if it says us
+  // - Handoff: leader writes leader.json with target's ID, yields
+  let followerProbeCount = 0;
+  const probeIntervalCycles = 6 + Math.floor(Math.random() * 4); // 30-50s jitter
+  const STALE_LEADER_MS = 120_000; // Consider leader dead after 2min without update
+
   while (isRunning) {
     if (!isLeader) {
-      // Follower mode: periodically probe to detect dead leader
       followerProbeCount++;
       if (followerProbeCount < probeIntervalCycles) {
         await sleep(5000);
@@ -343,24 +348,47 @@ async function main() {
       }
       followerProbeCount = 0;
 
-      // Probe: try to poll with very short timeout
+      // Probe: try to poll — but only claim if leader.json says we're the leader
       try {
-        const messages = await channel.poll(1); // 1s timeout — just testing
+        const messages = await channel.poll(1);
 
-        // Success (no 409) = no other instance is polling = claim leadership
-        // If leader were alive, Telegram would reject us with 409
-        console.log(`👑 Leader gone (probe succeeded, ${messages.length} msg) — claiming leadership`);
-        isLeader = true;
+        // Poll succeeded (no 409). Check leader.json before claiming.
         if (config.github.enabled && config.github.syncEnabled) {
-          writeLeaderClaim(config.github.repoPath, config.machine.id, config.machine.name);
+          const leader = readLeaderClaim(config.github.repoPath);
+          if (leader && leader.machine_id === config.machine.id) {
+            // leader.json says us — we were handed leadership (e.g., via handoff)
+            console.log('👑 leader.json says us — claiming leadership');
+            isLeader = true;
+          } else if (leader && leader.machine_id !== config.machine.id) {
+            // leader.json says someone else. Check if they're stale (dead).
+            const claimedAt = new Date(leader.claimed_at).getTime();
+            if (Date.now() - claimedAt > STALE_LEADER_MS) {
+              console.log(`👑 Leader ${leader.machine_name} stale (${Math.floor((Date.now() - claimedAt) / 1000)}s) — taking over`);
+              writeLeaderClaim(config.github.repoPath, config.machine.id, config.machine.name);
+              isLeader = true;
+            }
+            // Otherwise: leader is recent, stay follower (they're probably just between polls)
+          } else {
+            // No leader.json at all — claim
+            console.log('👑 No leader.json — claiming leadership');
+            writeLeaderClaim(config.github.repoPath, config.machine.id, config.machine.name);
+            isLeader = true;
+          }
+        } else {
+          // No sync repo — just claim on any successful poll
+          isLeader = true;
         }
-        for (const message of messages) {
-          await processMessage(channel, channelConfig.type, message, security, config);
+
+        if (isLeader) {
+          // Process any messages from the probe
+          for (const message of messages) {
+            await processMessage(channel, channelConfig.type, message, security, config);
+          }
         }
       } catch (error) {
         const errMsg = String(error);
         if (errMsg.includes('Conflict') || errMsg.includes('409') || errMsg.includes('terminated by other')) {
-          // Leader is alive — stay as follower
+          // Leader is actively polling — stay follower
         } else {
           console.log(`⚠️ Follower probe error: ${errMsg.slice(0, 100)}`);
         }
@@ -372,15 +400,13 @@ async function main() {
       const messages = await channel.poll(config.telegram.pollTimeoutSeconds);
 
       for (const message of messages) {
-        // Finish processing the entire batch even if isLeader flips mid-batch
-        // (yield takes effect after the batch, not mid-message)
         await processMessage(channel, channelConfig.type, message, security, config);
       }
     } catch (error) {
       const errMsg = String(error);
       if (errMsg.includes('Conflict') || errMsg.includes('409') || errMsg.includes('terminated by other')) {
-        // Another instance is polling — yield leadership
-        console.log('⚠️  Another instance is polling this bot. Yielding to follower mode...');
+        // Another instance is polling — yield (don't touch leader.json, it's theirs)
+        console.log('⚠️  Another instance is polling. Yielding to follower mode...');
         isLeader = false;
         followerProbeCount = 0;
       } else {
