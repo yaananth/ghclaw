@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 /**
  * GHClaw CLI
- * Local Telegram bot powered by Copilot CLI
+ * Personal AI assistant powered by Copilot CLI
  *
  * Usage: ghclaw <command>
  */
@@ -33,7 +33,7 @@ const program = new Command();
 
 program
   .name('ghclaw')
-  .description('Local Telegram bot powered by Copilot CLI')
+  .description('Personal AI assistant powered by Copilot CLI')
   .version(getVersion());
 
 // ============================================================================
@@ -121,7 +121,7 @@ program
 
 program
   .command('setup')
-  .description('Interactive setup wizard (uses OS keychain for secrets)')
+  .description('Interactive setup wizard')
   .action(async () => {
     await runSetup();
   });

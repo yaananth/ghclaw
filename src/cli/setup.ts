@@ -30,7 +30,7 @@ export async function runSetup(): Promise<void> {
   console.log(`
 ╔══════════════════════════════════════════════════════════════╗
 ║                  GHClaw Setup v${version.padEnd(40 - 18, ' ')}║
-║         Local Telegram Bot powered by Copilot CLI            ║
+║         Personal AI Assistant powered by Copilot CLI         ║
 ╚══════════════════════════════════════════════════════════════╝
 `);
 

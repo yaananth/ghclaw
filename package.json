@@ -1,7 +1,7 @@
 {
   "name": "ghclaw",
   "version": "0.1.0",
-  "description": "Local Telegram bot powered by Copilot CLI with full feature discovery",
+  "description": "Personal AI assistant powered by Copilot CLI with cross-machine sync",
   "type": "module",
   "bin": {
     "ghclaw": "./bin/ghclaw.ts"

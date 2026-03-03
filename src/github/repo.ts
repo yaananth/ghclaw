@@ -8,13 +8,29 @@ import * as path from 'path';
 import { getGhToken } from './auth';
 
 /**
+ * Build a clean env for gh CLI calls, ensuring GITHUB_TOKEN doesn't interfere.
+ * In Codespaces, GITHUB_TOKEN is auto-set with limited scopes and overrides stored auth.
+ */
+function cleanGhEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (k === 'GITHUB_TOKEN') continue; // exclude entirely
+    if (v !== undefined) env[k] = v;
+  }
+  return env;
+}
+
+/**
  * Check if the sync repo exists on GitHub
  */
 export async function checkRepoExists(username: string, repoName: string = '.ghclaw'): Promise<boolean> {
+  const env = cleanGhEnv();
+
   // Try gh repo view first
   const proc = Bun.spawn(['gh', 'repo', 'view', `${username}/${repoName}`, '--json', 'name'], {
     stdout: 'pipe',
     stderr: 'pipe',
+    env,
   });
   const exitCode = await proc.exited;
   if (exitCode === 0) return true;
@@ -24,6 +40,7 @@ export async function checkRepoExists(username: string, repoName: string = '.ghc
   const apiProc = Bun.spawn(['gh', 'api', `repos/${username}/${repoName}`, '--jq', '.name'], {
     stdout: 'pipe',
     stderr: 'pipe',
+    env,
   });
   const apiExit = await apiProc.exited;
   if (apiExit === 0) return true;
@@ -52,6 +69,7 @@ export async function createRepo(username: string, repoName: string = '.ghclaw')
   ], {
     stdout: 'pipe',
     stderr: 'pipe',
+    env: cleanGhEnv(),
   });
   const exitCode = await proc.exited;
   if (exitCode !== 0) {
@@ -85,6 +103,7 @@ export async function cloneRepo(username: string, localPath: string, repoName: s
   ], {
     stdout: 'pipe',
     stderr: 'pipe',
+    env: cleanGhEnv(),
   });
   const exitCode = await proc.exited;
   if (exitCode !== 0) {
