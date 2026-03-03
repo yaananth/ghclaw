@@ -7,6 +7,23 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { getGhToken } from './auth';
 
+// Simple async mutex to prevent concurrent git operations on the same repo.
+// The sync loop and handoff push both operate on the same working tree —
+// concurrent git add/commit/push causes silent failures.
+let gitLock: Promise<void> = Promise.resolve();
+
+export async function withGitLock<T>(fn: () => Promise<T>): Promise<T> {
+  let release: () => void;
+  const prev = gitLock;
+  gitLock = new Promise<void>(resolve => { release = resolve; });
+  await prev; // Wait for previous operation to finish
+  try {
+    return await fn();
+  } finally {
+    release!();
+  }
+}
+
 /**
  * Build env for gh/git CLI calls.
  * In Codespaces (CODESPACES=true), strips GITHUB_TOKEN which has limited scopes
@@ -283,73 +300,77 @@ export async function setRepoSecrets(
  * Pull latest changes from remote
  */
 export async function gitPull(repoPath: string): Promise<boolean> {
-  await fixGitCredentialHelper(repoPath);
+  return withGitLock(async () => {
+    await fixGitCredentialHelper(repoPath);
 
-  // Abort any stuck rebase first
-  const statusProc = Bun.spawn(['git', 'status'], {
-    stdout: 'pipe', stderr: 'pipe', cwd: repoPath,
-  });
-  await statusProc.exited;
-  const statusOut = (await new Response(statusProc.stdout).text());
-  if (statusOut.includes('rebase in progress') || statusOut.includes('rebasing')) {
-    Bun.spawn(['git', 'rebase', '--abort'], {
-      stdout: 'pipe', stderr: 'pipe', cwd: repoPath, env: cleanGhEnv(),
+    // Abort any stuck rebase first
+    const statusProc = Bun.spawn(['git', 'status'], {
+      stdout: 'pipe', stderr: 'pipe', cwd: repoPath,
     });
-    await new Promise(r => setTimeout(r, 500));
-  }
+    await statusProc.exited;
+    const statusOut = (await new Response(statusProc.stdout).text());
+    if (statusOut.includes('rebase in progress') || statusOut.includes('rebasing')) {
+      Bun.spawn(['git', 'rebase', '--abort'], {
+        stdout: 'pipe', stderr: 'pipe', cwd: repoPath, env: cleanGhEnv(),
+      });
+      await new Promise(r => setTimeout(r, 500));
+    }
 
-  // Use merge (not rebase) to avoid conflicts between concurrent machine syncs
-  const proc = Bun.spawn(['git', 'pull', '--no-rebase', '--quiet', '--strategy=recursive', '--strategy-option=theirs'], {
-    stdout: 'pipe',
-    stderr: 'pipe',
-    cwd: repoPath,
-    env: cleanGhEnv(),
+    // Use merge (not rebase) to avoid conflicts between concurrent machine syncs
+    const proc = Bun.spawn(['git', 'pull', '--no-rebase', '--quiet', '--strategy=recursive', '--strategy-option=theirs'], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+      cwd: repoPath,
+      env: cleanGhEnv(),
+    });
+    const exitCode = await proc.exited;
+    return exitCode === 0;
   });
-  const exitCode = await proc.exited;
-  return exitCode === 0;
 }
 
 /**
  * Commit and push changes if any exist
  */
 export async function gitCommitAndPush(repoPath: string, message: string): Promise<boolean> {
-  if (!(await hasChanges(repoPath))) return false;
-  await fixGitCredentialHelper(repoPath);
+  return withGitLock(async () => {
+    if (!(await hasChangesUnsafe(repoPath))) return false;
+    await fixGitCredentialHelper(repoPath);
 
-  // Stage only known managed paths (avoid staging unexpected files)
-  const add = Bun.spawn(['git', 'add', 'memory/', '.github/workflows/', 'README.md'], {
-    stdout: 'pipe',
-    stderr: 'pipe',
-    cwd: repoPath,
-    env: cleanGhEnv(),
-  });
-  await add.exited;
+    // Stage only known managed paths (avoid staging unexpected files)
+    const add = Bun.spawn(['git', 'add', 'memory/', '.github/workflows/', 'README.md'], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+      cwd: repoPath,
+      env: cleanGhEnv(),
+    });
+    await add.exited;
 
-  // Commit
-  const commit = Bun.spawn(['git', 'commit', '-m', message, '--quiet'], {
-    stdout: 'pipe',
-    stderr: 'pipe',
-    cwd: repoPath,
-    env: cleanGhEnv(),
-  });
-  const commitExit = await commit.exited;
-  if (commitExit !== 0) return false;
+    // Commit
+    const commit = Bun.spawn(['git', 'commit', '-m', message, '--quiet'], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+      cwd: repoPath,
+      env: cleanGhEnv(),
+    });
+    const commitExit = await commit.exited;
+    if (commitExit !== 0) return false;
 
-  // Push
-  const push = Bun.spawn(['git', 'push', '--quiet'], {
-    stdout: 'pipe',
-    stderr: 'pipe',
-    cwd: repoPath,
-    env: cleanGhEnv(),
+    // Push
+    const push = Bun.spawn(['git', 'push', '--quiet'], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+      cwd: repoPath,
+      env: cleanGhEnv(),
+    });
+    const pushExit = await push.exited;
+    return pushExit === 0;
   });
-  const pushExit = await push.exited;
-  return pushExit === 0;
 }
 
 /**
- * Check if there are uncommitted changes in the repo
+ * Check if there are uncommitted changes in the repo (no lock — safe for internal use)
  */
-export async function hasChanges(repoPath: string): Promise<boolean> {
+async function hasChangesUnsafe(repoPath: string): Promise<boolean> {
   const proc = Bun.spawn(['git', 'status', '--porcelain'], {
     stdout: 'pipe',
     stderr: 'pipe',
@@ -358,4 +379,11 @@ export async function hasChanges(repoPath: string): Promise<boolean> {
   await proc.exited;
   const output = (await new Response(proc.stdout).text()).trim();
   return output.length > 0;
+}
+
+/**
+ * Check if there are uncommitted changes in the repo
+ */
+export async function hasChanges(repoPath: string): Promise<boolean> {
+  return hasChangesUnsafe(repoPath);
 }
