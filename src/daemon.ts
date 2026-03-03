@@ -330,8 +330,6 @@ async function main() {
 
   // Main polling loop
   let followerProbeCount = 0;  // Counts cycles since last probe
-  let consecutiveProbeSuccesses = 0;  // Must succeed 2x in a row to claim leadership
-  let bufferedMessages: ChannelMessage[] = [];  // Messages from first probe success (held until confirmed)
   while (isRunning) {
     if (!isLeader) {
       // Follower mode: periodically probe to detect dead leader
@@ -346,43 +344,33 @@ async function main() {
       // Probe: try to poll with very short timeout
       try {
         const messages = await channel.poll(1); // 1s timeout — just testing
-        // Empty poll can succeed during leader's gap between calls — doesn't count
+
+        // Empty poll can succeed during leader's brief gap between calls
+        // This is NOT evidence the leader is dead — skip
         if (messages.length === 0) {
-          // Don't count empty polls as evidence of dead leader
           continue;
         }
 
-        consecutiveProbeSuccesses++;
-
-        if (consecutiveProbeSuccesses >= 2) {
-          // Two consecutive non-empty successes = leader is truly gone
-          console.log('👑 Leader confirmed gone (2 consecutive probes succeeded) — claiming leadership');
-          isLeader = true;
-          consecutiveProbeSuccesses = 0;
-          if (config.github.enabled && config.github.syncEnabled) {
-            writeLeaderClaim(config.github.repoPath, config.machine.id, config.machine.name);
-          }
-          // Process buffered messages from first probe + current messages
-          const allMessages = [...bufferedMessages, ...messages];
-          bufferedMessages = [];
-          for (const message of allMessages) {
-            await processMessage(channel, channelConfig.type, message, security, config);
-          }
-        } else {
-          console.log(`🔍 Follower probe succeeded (1/2, ${messages.length} msg) — will confirm on next probe`);
-          // Buffer messages from first success — process them if we confirm on next probe
-          bufferedMessages = messages;
+        // Non-empty poll = Telegram delivered messages to us = leader is truly gone
+        // (If leader was alive & polling, Telegram would give us 409 or give messages to them)
+        // Edge case: leader could be between polls (processing a batch). In that case:
+        // - We claim leadership and process the messages (no loss)
+        // - Leader gets 409 on its next poll and yields (brief overlap, converges fast)
+        // This is acceptable: no messages lost, brief overlap resolves in one poll cycle
+        console.log(`👑 Leader gone (probe got ${messages.length} msg) — claiming leadership`);
+        isLeader = true;
+        if (config.github.enabled && config.github.syncEnabled) {
+          writeLeaderClaim(config.github.repoPath, config.machine.id, config.machine.name);
+        }
+        for (const message of messages) {
+          await processMessage(channel, channelConfig.type, message, security, config);
         }
       } catch (error) {
         const errMsg = String(error);
         if (errMsg.includes('Conflict') || errMsg.includes('409') || errMsg.includes('terminated by other')) {
-          // Leader is alive — reset
-          consecutiveProbeSuccesses = 0;
-          bufferedMessages = [];
+          // Leader is alive — stay as follower
         } else {
           console.log(`⚠️ Follower probe error: ${errMsg.slice(0, 100)}`);
-          consecutiveProbeSuccesses = 0;
-          bufferedMessages = [];
         }
       }
       continue;
@@ -392,7 +380,7 @@ async function main() {
       const messages = await channel.poll(config.telegram.pollTimeoutSeconds);
 
       for (const message of messages) {
-        // Note: we finish processing the entire batch even if isLeader flips mid-batch
+        // Finish processing the entire batch even if isLeader flips mid-batch
         // (yield takes effect after the batch, not mid-message)
         await processMessage(channel, channelConfig.type, message, security, config);
       }
@@ -403,8 +391,6 @@ async function main() {
         console.log('⚠️  Another instance is polling this bot. Yielding to follower mode...');
         isLeader = false;
         followerProbeCount = 0;
-        consecutiveProbeSuccesses = 0;
-        bufferedMessages = [];
       } else {
         console.error('❌ Polling error:', error);
         await sleep(config.telegram.pollIntervalMs * 5);
@@ -581,21 +567,30 @@ async function processMessageInner(
         );
         // Push handoff immediately so target picks it up fast
         const { gitCommitAndPush: pushNow, hasChanges: checkDirty } = await import('./github/repo');
+        let pushSucceeded = false;
         try {
           if (await checkDirty(config.github.repoPath)) {
-            await pushNow(config.github.repoPath, `handoff: ${config.machine.name} → ${targetName}`);
+            pushSucceeded = await pushNow(config.github.repoPath, `handoff: ${config.machine.name} → ${targetName}`);
           }
         } catch (pushErr) {
-          console.log(`⚠️ Handoff push failed: ${pushErr} (target will pick up on next sync)`);
+          console.log(`⚠️ Handoff push failed: ${pushErr}`);
         }
-        // Yield leadership
-        isLeader = false;
 
-        await channel.send(chatId, `🔄 Routing to *${targetName}*... it will pick this up shortly.`, {
-          threadId: threadId !== '0' ? threadId : undefined,
-          format: 'markdown',
-        });
-        return;
+        if (pushSucceeded) {
+          // Yield leadership — target will pick up the handoff
+          isLeader = false;
+          await channel.send(chatId, `🔄 Routing to *${targetName}*... it will pick this up shortly.`, {
+            threadId: threadId !== '0' ? threadId : undefined,
+            format: 'markdown',
+          });
+          return;
+        }
+        // Push failed — delete the local handoff.json to prevent stale handoff
+        // being published later by the sync loop (which would cause duplicate processing)
+        const { clearHandoffRequest } = await import('./github/sync');
+        clearHandoffRequest(config.github.repoPath);
+        console.log(`⚠️ [${sessionName}] Handoff push failed — claiming locally instead`);
+        claimSession(session.id, config.machine.id, config.machine.name);
       }
 
       // No sync repo — just claim and process locally
