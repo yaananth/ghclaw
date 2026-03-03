@@ -367,11 +367,11 @@ async function main() {
   }
 
   // Main polling loop
-  // Leadership is determined by leader.json (source of truth), NOT by Telegram 409.
-  // - On start: write leader.json with self, start as leader
-  // - 409: become follower (don't touch leader.json — someone else owns it)
-  // - Follower probe succeeds: check leader.json — only claim if it says us
-  // - Handoff: leader writes leader.json with target's ID, yields
+  // - On start: isLeader=true, start polling
+  // - 409: become follower
+  // - Follower probe succeeds: only claim if leader.json is stale or missing
+  //   (NOT if leader.json says us — we may have written it before yielding)
+  // - Handoff: handled by onHandoff callback in sync loop (sets isLeader directly)
   let followerProbeCount = 0;
   const probeIntervalCycles = 6 + Math.floor(Math.random() * 4); // 30-50s jitter
   const STALE_LEADER_MS = 120_000; // Consider leader dead after 2min without update
@@ -385,26 +385,24 @@ async function main() {
       }
       followerProbeCount = 0;
 
-      // Probe: try to poll — but only claim if leader.json says we're the leader
+      // Probe: try to poll — only claim if leader is stale or absent
       try {
         const messages = await channel.poll(1);
 
         // Poll succeeded (no 409). Check leader.json before claiming.
         if (config.github.enabled && config.github.syncEnabled) {
           const leader = readLeaderClaim(config.github.repoPath);
-          if (leader && leader.machine_id === config.machine.id) {
-            // leader.json says us — we were handed leadership (e.g., via handoff)
-            console.log('👑 leader.json says us — claiming leadership');
-            isLeader = true;
-          } else if (leader && leader.machine_id !== config.machine.id) {
-            // leader.json says someone else. Check if they're stale (dead).
+          if (leader) {
+            // leader.json exists. Only claim if it's stale (leader is dead).
+            // Don't claim just because it says us — we may have written it before yielding.
+            // Handoffs set isLeader directly via onHandoff callback, not here.
             const claimedAt = new Date(leader.claimed_at).getTime();
             if (Date.now() - claimedAt > STALE_LEADER_MS) {
               console.log(`👑 Leader ${leader.machine_name} stale (${Math.floor((Date.now() - claimedAt) / 1000)}s) — taking over`);
               writeLeaderClaim(config.github.repoPath, config.machine.id, config.machine.name);
               isLeader = true;
             }
-            // Otherwise: leader is recent, stay follower (they're probably just between polls)
+            // Otherwise: leader.json is recent — stay follower
           } else {
             // No leader.json at all — claim
             console.log('👑 No leader.json — claiming leadership');
