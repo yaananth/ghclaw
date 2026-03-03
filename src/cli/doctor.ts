@@ -402,6 +402,110 @@ function checkMisconfigurations(): DiagnosticResult[] {
   return results;
 }
 
+/**
+ * Auto-fix common git issues in the sync repo:
+ * - Detached HEAD → checkout main
+ * - Stuck rebase → abort rebase
+ * - Diverged branches → merge with theirs strategy
+ * Returns a DiagnosticResult if a fix was applied, null otherwise.
+ */
+async function autoFixGitIssues(repoPath: string, env?: Record<string, string>): Promise<DiagnosticResult | null> {
+  // Check git status
+  const statusProc = Bun.spawn(['git', 'status'], {
+    cwd: repoPath, stdout: 'pipe', stderr: 'pipe', env,
+  });
+  await statusProc.exited;
+  const statusOut = await new Response(statusProc.stdout).text();
+
+  // Check current branch
+  const branchProc = Bun.spawn(['git', 'branch', '--show-current'], {
+    cwd: repoPath, stdout: 'pipe', stderr: 'pipe', env,
+  });
+  await branchProc.exited;
+  const currentBranch = (await new Response(branchProc.stdout).text()).trim();
+
+  const fixes: string[] = [];
+
+  // Fix 1: Stuck rebase
+  if (statusOut.includes('rebase in progress') || statusOut.includes('rebasing')) {
+    const abort = Bun.spawn(['git', 'rebase', '--abort'], {
+      cwd: repoPath, stdout: 'pipe', stderr: 'pipe', env,
+    });
+    await abort.exited;
+    fixes.push('aborted stuck rebase');
+  }
+
+  // Fix 2: Detached HEAD (currentBranch is empty when detached)
+  if (!currentBranch) {
+    // Try to checkout main
+    const checkout = Bun.spawn(['git', 'checkout', 'main'], {
+      cwd: repoPath, stdout: 'pipe', stderr: 'pipe', env,
+    });
+    const checkoutExit = await checkout.exited;
+    if (checkoutExit === 0) {
+      fixes.push('checked out main (was detached HEAD)');
+    } else {
+      // main might not exist, try to find default branch
+      const remoteBranch = Bun.spawn(['git', 'remote', 'show', 'origin'], {
+        cwd: repoPath, stdout: 'pipe', stderr: 'pipe', env,
+      });
+      await remoteBranch.exited;
+      const remoteOut = await new Response(remoteBranch.stdout).text();
+      const defaultMatch = remoteOut.match(/HEAD branch:\s*(\S+)/);
+      const defaultBranch = defaultMatch?.[1] || 'main';
+
+      const checkout2 = Bun.spawn(['git', 'checkout', '-B', defaultBranch, `origin/${defaultBranch}`], {
+        cwd: repoPath, stdout: 'pipe', stderr: 'pipe', env,
+      });
+      const exit2 = await checkout2.exited;
+      if (exit2 === 0) {
+        fixes.push(`checked out ${defaultBranch} from origin (was detached HEAD)`);
+      } else {
+        fixes.push('detached HEAD (could not auto-fix)');
+      }
+    }
+  }
+
+  // Fix 3: Diverged branches — fetch and reset to remote if local has no unique commits worth keeping
+  // (sync repo data is auto-generated, safe to reset)
+  if (fixes.length === 0) {
+    // Check if we're diverged
+    const fetchProc = Bun.spawn(['git', 'fetch', 'origin'], {
+      cwd: repoPath, stdout: 'pipe', stderr: 'pipe', env,
+    });
+    await fetchProc.exited;
+
+    const branch = currentBranch || 'main';
+    const aheadBehind = Bun.spawn(['git', 'rev-list', '--left-right', '--count', `origin/${branch}...HEAD`], {
+      cwd: repoPath, stdout: 'pipe', stderr: 'pipe', env,
+    });
+    await aheadBehind.exited;
+    const abOut = (await new Response(aheadBehind.stdout).text()).trim();
+    const parts = abOut.split(/\s+/);
+    const behind = parseInt(parts[0]) || 0;
+    const ahead = parseInt(parts[1]) || 0;
+
+    if (behind > 10 && ahead > 10) {
+      // Heavily diverged — reset to remote (sync data is disposable)
+      const reset = Bun.spawn(['git', 'reset', '--hard', `origin/${branch}`], {
+        cwd: repoPath, stdout: 'pipe', stderr: 'pipe', env,
+      });
+      const resetExit = await reset.exited;
+      if (resetExit === 0) {
+        fixes.push(`reset to origin/${branch} (was ${ahead} ahead, ${behind} behind — sync data is auto-regenerated)`);
+      }
+    }
+  }
+
+  if (fixes.length === 0) return null;
+
+  return {
+    name: 'GitHub Git Auto-Fix',
+    status: 'ok',
+    message: `Auto-fixed: ${fixes.join('; ')}`,
+  };
+}
+
 async function checkGithubIntegration(autoFix = false): Promise<DiagnosticResult[]> {
   const results: DiagnosticResult[] = [];
 
@@ -438,16 +542,26 @@ async function checkGithubIntegration(autoFix = false): Promise<DiagnosticResult
       fix: cloneExists ? undefined : 'Run: ghclaw setup',
     });
 
-    // Verify push access by doing a dry-run
+    // Verify push access by doing a dry-run (with auto-fix for common git issues)
     if (cloneExists) {
       try {
         await fixGitCredentialHelper(config.github.repoPath);
-        // Pull first to avoid "rejected: fetch first" false positive
         const codespaceEnv = process.env.CODESPACES === 'true'
           ? Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'GITHUB_TOKEN') as [string, string][])
           : undefined;
-        const pullProc = Bun.spawn(['git', 'pull', '--rebase', '--quiet'], {
-          cwd: config.github.repoPath,
+        const rp = config.github.repoPath;
+
+        // Auto-fix: detect and resolve common git issues before pull/push check
+        if (autoFix) {
+          const fixResult = await autoFixGitIssues(rp, codespaceEnv);
+          if (fixResult) {
+            results.push(fixResult);
+          }
+        }
+
+        // Pull first to avoid "rejected: fetch first" false positive
+        const pullProc = Bun.spawn(['git', 'pull', '--no-rebase', '--quiet', '--strategy=recursive', '--strategy-option=theirs'], {
+          cwd: rp,
           stdout: 'pipe',
           stderr: 'pipe',
           env: codespaceEnv,
@@ -455,7 +569,7 @@ async function checkGithubIntegration(autoFix = false): Promise<DiagnosticResult
         await pullProc.exited;
 
         const pushProc = Bun.spawn(['git', 'push', '--dry-run'], {
-          cwd: config.github.repoPath,
+          cwd: rp,
           stdout: 'pipe',
           stderr: 'pipe',
           env: codespaceEnv,
@@ -464,11 +578,11 @@ async function checkGithubIntegration(autoFix = false): Promise<DiagnosticResult
         const pushStderr = (await new Response(pushProc.stderr).text()).trim();
         // "rejected" means auth works but repo is out of sync — not an auth error
         const isAuthError = pushExit !== 0 && !pushStderr.includes('rejected') && !pushStderr.includes('fetch first');
-        const pushCmd = `git push --dry-run (cwd: ${config.github.repoPath})`;
+        const pushCmd = `git push --dry-run (cwd: ${rp}${process.env.CODESPACES === 'true' ? ', GITHUB_TOKEN stripped' : ''}${process.env.GITHUB_TOKEN ? ', GITHUB_TOKEN is set' : ''})`;
         results.push({
           name: 'GitHub Push Access',
           status: pushExit === 0 || !isAuthError ? 'ok' : 'error',
-          message: pushExit === 0 ? 'Push access verified' : isAuthError ? `Cannot push to sync repo` : 'Push access verified (repo needs sync)',
+          message: pushExit === 0 ? 'Push access verified' : isAuthError ? 'Cannot push to sync repo' : 'Push access verified (repo needs sync)',
           fix: isAuthError ? `${pushStderr || 'unknown error'} (ran: ${pushCmd})` : undefined,
         });
       } catch (err: any) {

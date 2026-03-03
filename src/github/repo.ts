@@ -284,7 +284,22 @@ export async function setRepoSecrets(
  */
 export async function gitPull(repoPath: string): Promise<boolean> {
   await fixGitCredentialHelper(repoPath);
-  const proc = Bun.spawn(['git', 'pull', '--rebase', '--quiet'], {
+
+  // Abort any stuck rebase first
+  const statusProc = Bun.spawn(['git', 'status'], {
+    stdout: 'pipe', stderr: 'pipe', cwd: repoPath,
+  });
+  await statusProc.exited;
+  const statusOut = (await new Response(statusProc.stdout).text());
+  if (statusOut.includes('rebase in progress') || statusOut.includes('rebasing')) {
+    Bun.spawn(['git', 'rebase', '--abort'], {
+      stdout: 'pipe', stderr: 'pipe', cwd: repoPath, env: cleanGhEnv(),
+    });
+    await new Promise(r => setTimeout(r, 500));
+  }
+
+  // Use merge (not rebase) to avoid conflicts between concurrent machine syncs
+  const proc = Bun.spawn(['git', 'pull', '--no-rebase', '--quiet', '--strategy=recursive', '--strategy-option=theirs'], {
     stdout: 'pipe',
     stderr: 'pipe',
     cwd: repoPath,

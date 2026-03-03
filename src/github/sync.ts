@@ -126,56 +126,94 @@ export function clearHandoffRequest(repoPath: string): void {
 }
 
 /**
- * Export sessions to JSON files in the repo
+ * Export sessions to JSON files in the repo.
+ * Returns true if data actually changed (skips write if unchanged to avoid needless commits).
  */
-export function exportSessionsToJson(repoPath: string, sessions: TelegramSession[]): void {
+export function exportSessionsToJson(repoPath: string, sessions: TelegramSession[]): boolean {
   const sessionsPath = path.join(repoPath, 'memory', 'sessions.json');
   fs.mkdirSync(path.dirname(sessionsPath), { recursive: true });
+
+  // Build session data WITHOUT volatile timestamps (exportedAt changes every cycle)
+  const sessionData = sessions.map(s => ({
+    id: s.id,
+    name: s.name,
+    status: s.status,
+    created_at: s.created_at,
+    last_activity: s.last_activity,
+    message_count: s.message_count,
+    machine_id: s.machine_id,
+    machine_name: s.machine_name,
+  }));
+
+  // Compare with existing file to skip needless writes
+  const newFingerprint = JSON.stringify(sessionData);
+  try {
+    const existing = JSON.parse(fs.readFileSync(sessionsPath, 'utf-8'));
+    if (JSON.stringify(existing.sessions) === newFingerprint) {
+      return false; // No meaningful change
+    }
+  } catch {
+    // File doesn't exist or corrupt — write it
+  }
 
   const data = {
     exportedAt: new Date().toISOString(),
     count: sessions.length,
-    sessions: sessions.map(s => ({
-      id: s.id,
-      name: s.name,
-      status: s.status,
-      created_at: s.created_at,
-      last_activity: s.last_activity,
-      message_count: s.message_count,
-      machine_id: s.machine_id,
-      machine_name: s.machine_name,
-    })),
+    sessions: sessionData,
   };
 
   fs.writeFileSync(sessionsPath, JSON.stringify(data, null, 2));
+  return true;
 }
 
 /**
- * Export machine-specific info
+ * Export machine-specific info.
+ * Returns true if data actually changed.
  */
 export function exportMachineInfo(
   repoPath: string,
   machineId: string,
   machineName: string,
   sessions: TelegramSession[]
-): void {
+): boolean {
   const machinePath = path.join(repoPath, 'memory', 'machines', `${machineId}.json`);
   fs.mkdirSync(path.dirname(machinePath), { recursive: true });
+
+  // Build session data WITHOUT volatile timestamp
+  const sessionData = sessions.map(s => ({
+    id: s.id,
+    name: s.name,
+    last_activity: s.last_activity,
+    message_count: s.message_count,
+  }));
+
+  // Compare with existing to skip needless writes
+  const newFingerprint = JSON.stringify({ machineId, machineName, sessionCount: sessions.length, sessions: sessionData });
+  try {
+    const existing = JSON.parse(fs.readFileSync(machinePath, 'utf-8'));
+    const existingFingerprint = JSON.stringify({
+      machineId: existing.machineId,
+      machineName: existing.machineName,
+      sessionCount: existing.sessionCount,
+      sessions: existing.sessions,
+    });
+    if (existingFingerprint === newFingerprint) {
+      return false; // No meaningful change
+    }
+  } catch {
+    // File doesn't exist or corrupt — write it
+  }
 
   const data = {
     machineId,
     machineName,
     updatedAt: new Date().toISOString(),
     sessionCount: sessions.length,
-    sessions: sessions.map(s => ({
-      id: s.id,
-      name: s.name,
-      last_activity: s.last_activity,
-      message_count: s.message_count,
-    })),
+    sessions: sessionData,
   };
 
   fs.writeFileSync(machinePath, JSON.stringify(data, null, 2));
+  return true;
 }
 
 /**
@@ -272,15 +310,15 @@ export async function startSyncLoop(
         onYield?.();
       }
 
-      // Export local data
+      // Export local data (only writes files if data actually changed)
       const allSessions = getActiveSessions(100);
-      exportSessionsToJson(repoPath, allSessions);
+      const sessionsChanged = exportSessionsToJson(repoPath, allSessions);
 
       const machineSessions = getSessionsByMachine(config.machine.id);
-      exportMachineInfo(repoPath, config.machine.id, config.machine.name, machineSessions);
+      const machineChanged = exportMachineInfo(repoPath, config.machine.id, config.machine.name, machineSessions);
 
-      // Push if changes
-      if (await hasChanges(repoPath)) {
+      // Only commit+push if something meaningful changed (avoids hammering on every cycle)
+      if ((sessionsChanged || machineChanged) && await hasChanges(repoPath)) {
         const pushed = await gitCommitAndPush(repoPath, `sync: ${config.machine.name} @ ${new Date().toISOString()}`);
         if (pushed) {
           syncState.syncCount++;
