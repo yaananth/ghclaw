@@ -212,6 +212,7 @@ export async function setRepoSecrets(
       stdin: 'pipe',
       stdout: 'pipe',
       stderr: 'pipe',
+      env: cleanGhEnv(),
     });
     proc.stdin.write(value);
     proc.stdin.end();
@@ -235,6 +236,7 @@ export async function gitPull(repoPath: string): Promise<boolean> {
     stdout: 'pipe',
     stderr: 'pipe',
     cwd: repoPath,
+    env: cleanGhEnv(),
   });
   const exitCode = await proc.exited;
   return exitCode === 0;
@@ -251,6 +253,7 @@ export async function gitCommitAndPush(repoPath: string, message: string): Promi
     stdout: 'pipe',
     stderr: 'pipe',
     cwd: repoPath,
+    env: cleanGhEnv(),
   });
   await add.exited;
 
@@ -259,6 +262,7 @@ export async function gitCommitAndPush(repoPath: string, message: string): Promi
     stdout: 'pipe',
     stderr: 'pipe',
     cwd: repoPath,
+    env: cleanGhEnv(),
   });
   const commitExit = await commit.exited;
   if (commitExit !== 0) return false;
@@ -268,6 +272,7 @@ export async function gitCommitAndPush(repoPath: string, message: string): Promi
     stdout: 'pipe',
     stderr: 'pipe',
     cwd: repoPath,
+    env: cleanGhEnv(),
   });
   const pushExit = await push.exited;
   return pushExit === 0;

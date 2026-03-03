@@ -630,6 +630,7 @@ export async function runSetup(): Promise<void> {
           cwd: repoPath,
           stdout: 'pipe',
           stderr: 'pipe',
+          env: Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'GITHUB_TOKEN') as [string, string][]),
         });
         const pushExit = await pushProc.exited;
         if (pushExit === 0) {

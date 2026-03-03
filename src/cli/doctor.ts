@@ -436,6 +436,7 @@ async function checkGithubIntegration(autoFix = false): Promise<DiagnosticResult
           cwd: config.github.repoPath,
           stdout: 'pipe',
           stderr: 'pipe',
+          env: Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== 'GITHUB_TOKEN') as [string, string][]),
         });
         const pushExit = await pushProc.exited;
         results.push({
