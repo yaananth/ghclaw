@@ -294,21 +294,65 @@ program
     if (options.foreground) {
       await startDaemon();
     } else {
-      // Background by default
+      // Background by default — but wait until daemon is actually ready
       const { spawn } = require('child_process');
+      const fs = require('fs');
       const logFile = `${getConfigDir()}/daemon.log`;
-      const out = require('fs').openSync(logFile, 'a');
-      const err = require('fs').openSync(logFile, 'a');
+
+      // Truncate log so we only watch new output
+      fs.writeFileSync(logFile, '');
+      const out = fs.openSync(logFile, 'a');
+      const err = fs.openSync(logFile, 'a');
 
       const child = spawn(process.execPath, [process.argv[1], 'start', '--foreground'], {
         detached: true,
         stdio: ['ignore', out, err],
       });
-
       child.unref();
-      console.log(`🚀 Daemon started in background (PID ${child.pid})`);
-      console.log(`   Logs: ghclaw logs`);
-      console.log(`   Stop: ghclaw stop\n`);
+
+      // Wait for ready signal or error (max 30s)
+      console.log(`⏳ Starting daemon (PID ${child.pid})...`);
+      const startTime = Date.now();
+      const timeoutMs = 30_000;
+      let ready = false;
+      let failed = false;
+
+      while (Date.now() - startTime < timeoutMs) {
+        await new Promise(r => setTimeout(r, 500));
+        try {
+          const log = fs.readFileSync(logFile, 'utf-8');
+          if (log.includes('__DAEMON_READY__')) {
+            ready = true;
+            break;
+          }
+          if (log.includes('❌') || log.includes('process.exit')) {
+            failed = true;
+            break;
+          }
+        } catch {
+          // Log file not yet written
+        }
+      }
+
+      if (ready) {
+        // Stream the startup log to the user (minus the internal marker)
+        const log = fs.readFileSync(logFile, 'utf-8')
+          .split('\n')
+          .filter((l: string) => !l.includes('__DAEMON_READY__'))
+          .join('\n')
+          .trim();
+        if (log) console.log(log);
+        console.log(`\n🚀 Daemon running (PID ${child.pid})`);
+        console.log(`   Logs: ghclaw logs`);
+        console.log(`   Stop: ghclaw stop\n`);
+      } else if (failed) {
+        const log = fs.readFileSync(logFile, 'utf-8').trim();
+        console.log(log);
+        console.log('\n❌ Daemon failed to start. Check logs above.');
+      } else {
+        console.log(`⚠️ Daemon may still be starting (timed out after ${timeoutMs / 1000}s)`);
+        console.log(`   Check: ghclaw logs`);
+      }
       process.exit(0);
     }
   });

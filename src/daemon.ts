@@ -165,7 +165,8 @@ async function main() {
     console.log('\n🧠 Sessions: Fresh start');
   }
 
-  console.log('\n📡 Starting polling loop...\n');
+  console.log('\n📡 Starting polling loop...');
+  console.log('__DAEMON_READY__'); // Marker for `ghclaw start` to detect readiness
   isRunning = true;
 
   // Write PID file (exclusive create prevents accidental overwrite)
