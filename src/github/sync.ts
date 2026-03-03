@@ -65,6 +65,19 @@ export function writeLeaderClaim(repoPath: string, machineId: string, machineNam
 }
 
 /**
+ * Remove the leader claim from the sync repo (e.g., on graceful shutdown)
+ */
+export function removeLeaderClaim(repoPath: string): boolean {
+  const leaderPath = path.join(repoPath, 'memory', 'leader.json');
+  try {
+    fs.unlinkSync(leaderPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Read the current leader claim from the sync repo
  */
 export function readLeaderClaim(repoPath: string): LeaderClaim | null {
