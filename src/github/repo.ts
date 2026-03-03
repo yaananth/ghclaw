@@ -118,30 +118,42 @@ export async function cloneRepo(username: string, localPath: string, repoName: s
 }
 
 /**
- * Fix git credential helper for Codespaces.
+ * Fix git credentials for Codespaces.
  * The Codespace-provided credential helper returns a limited GITHUB_TOKEN.
- * Override it to use `gh auth token` which has proper user scopes.
+ * Replace remote URL with token-authenticated URL using gh auth token.
  */
 export async function fixGitCredentialHelper(repoPath: string): Promise<void> {
-  // Only needed when the Codespace credential helper is active
-  const proc = Bun.spawn(['git', 'config', 'credential.helper'], {
+  // Check if current remote uses github.com https
+  const proc = Bun.spawn(['git', 'remote', 'get-url', 'origin'], {
     stdout: 'pipe',
     stderr: 'pipe',
     cwd: repoPath,
   });
   await proc.exited;
-  const helper = (await new Response(proc.stdout).text()).trim();
-  if (!helper.includes('codespace') && !helper.includes('gitcredential_github')) return;
+  const remoteUrl = (await new Response(proc.stdout).text()).trim();
+  if (!remoteUrl.startsWith('https://github.com/')) return;
 
-  // Override with a helper that uses gh auth token (stored user auth)
-  const setProc = Bun.spawn([
-    'git', 'config', 'credential.helper',
-    '!f() { echo "protocol=https"; echo "host=github.com"; echo "username=x-access-token"; echo "password=$(GITHUB_TOKEN= gh auth token)"; }; f',
-  ], {
+  // Already has token embedded
+  if (remoteUrl.includes('x-access-token:')) return;
+
+  // Get the proper user token via gh auth (with GITHUB_TOKEN cleared)
+  const tokenProc = Bun.spawn(['gh', 'auth', 'token'], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+    env: cleanGhEnv(),
+  });
+  const tokenExit = await tokenProc.exited;
+  if (tokenExit !== 0) return;
+  const token = (await new Response(tokenProc.stdout).text()).trim();
+  if (!token) return;
+
+  // Set remote URL with token embedded
+  const repoPath_ = remoteUrl.replace('https://github.com/', '');
+  const newUrl = `https://x-access-token:${token}@github.com/${repoPath_}`;
+  const setProc = Bun.spawn(['git', 'remote', 'set-url', 'origin', newUrl], {
     stdout: 'pipe',
     stderr: 'pipe',
     cwd: repoPath,
-    env: cleanGhEnv(),
   });
   await setProc.exited;
 }
