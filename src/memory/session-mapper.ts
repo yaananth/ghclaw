@@ -213,6 +213,16 @@ export function renameSession(sessionId: string, name: string): void {
 }
 
 /**
+ * Claim a session for this machine (transfer ownership)
+ */
+export function claimSession(sessionId: string, machineId: string, machineName: string): void {
+  const db = initDatabase();
+  db.prepare(`
+    UPDATE sessions SET machine_id = ?, machine_name = ? WHERE id = ?
+  `).run(machineId, machineName, sessionId);
+}
+
+/**
  * Archive a session
  */
 export function archiveSession(sessionId: string): void {

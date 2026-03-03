@@ -24,6 +24,7 @@ import {
   getSessionsWithTopics,
   createSessionWithTopic,
   getSessionMachine,
+  claimSession,
   getSyncedSessionIds,
   addSyncedSessionId,
 } from './memory/session-mapper';
@@ -426,15 +427,11 @@ async function processMessageInner(
     sessionId = session.id;
     sessionName = session.name;
 
-    // Soft-route: check if this session belongs to a different machine
+    // Soft-route: if session belongs to a different machine, claim it (this machine is the active poller)
     if (session.machine_id && session.machine_id !== config.machine.id) {
-      const ownerName = escapeMarkdown(session.machine_name || 'another machine');
-      console.log(`🔀 [${sessionName}] Redirecting: owned by ${ownerName} (${session.machine_id.slice(0, 8)})`);
-      await channel.send(chatId, `💻 This session lives on *${ownerName}*.\nResume there: \`copilot --resume ${session.id}\``, {
-        threadId: threadId !== '0' ? threadId : undefined,
-        format: 'markdown',
-      });
-      return;
+      const prevOwner = session.machine_name || 'another machine';
+      console.log(`🔀 [${sessionName}] Claiming session from ${prevOwner} (${session.machine_id.slice(0, 8)}) → ${config.machine.name}`);
+      claimSession(session.id, config.machine.id, config.machine.name);
     }
   }
 
