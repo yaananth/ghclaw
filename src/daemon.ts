@@ -633,32 +633,18 @@ async function processMessageInner(
           `Message in session "${sessionName}" owned by ${targetName}`,
           { chat_id: chatId, thread_id: threadId, text: message.text, from_user: message.sender?.displayName, from_user_id: message.sender?.id }
         );
-        // Push handoff immediately so target picks it up fast
-        const { gitCommitAndPush: pushNow, hasChanges: checkDirty } = await import('./github/repo');
-        let pushSucceeded = false;
-        try {
-          if (await checkDirty(config.github.repoPath)) {
-            pushSucceeded = await pushNow(config.github.repoPath, `handoff: ${config.machine.name} → ${targetName}`);
-          }
-        } catch (pushErr) {
-          console.log(`⚠️ Handoff push failed: ${pushErr}`);
-        }
+        // Also update leader.json to point to the target machine
+        writeLeaderClaim(config.github.repoPath, targetId, targetName);
 
-        if (pushSucceeded) {
-          // Yield leadership — target will pick up the handoff
-          isLeader = false;
-          await channel.send(chatId, `🔄 Routing to *${targetName}*... it will pick this up shortly.`, {
-            threadId: threadId !== '0' ? threadId : undefined,
-            format: 'markdown',
-          });
-          return;
-        }
-        // Push failed — delete the local handoff.json to prevent stale handoff
-        // being published later by the sync loop (which would cause duplicate processing)
-        const { clearHandoffRequest } = await import('./github/sync');
-        clearHandoffRequest(config.github.repoPath);
-        console.log(`⚠️ [${sessionName}] Handoff push failed — claiming locally instead`);
-        claimSession(session.id, config.machine.id, config.machine.name);
+        // Don't push separately — the sync loop will commit handoff.json + leader.json
+        // within ~5s. Pushing here races with the sync loop on the same git working tree,
+        // causing the push to silently fail (sync loop already committed the changes).
+        isLeader = false;
+        await channel.send(chatId, `🔄 Routing to *${targetName}*... it will pick this up shortly.`, {
+          threadId: threadId !== '0' ? threadId : undefined,
+          format: 'markdown',
+        });
+        return;
       }
 
       // No sync repo — just claim and process locally
