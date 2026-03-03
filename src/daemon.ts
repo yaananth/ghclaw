@@ -37,13 +37,14 @@ import {
 import { isChronicleAvailable, getChronicleStats, getRecentSessions as getChronicleRecentSessions } from './copilot/chronicle';
 import { parseActionBlocks, executeAction } from './actions';
 import { getGhToken } from './github/auth';
-import { startSyncLoop } from './github/sync';
+import { startSyncLoop, writeLeaderClaim, writeHandoffRequest, readLeaderClaim } from './github/sync';
 import { getVersion, getCommitHash } from './version';
 import * as fs from 'fs';
 import * as path from 'path';
 import { loadPrompt } from './prompts';
 
 let isRunning = false;
+let isLeader = true; // Start as leader (will yield on 409 or handoff)
 let discovery: CopilotDiscovery | null = null;
 
 /**
@@ -237,9 +238,47 @@ async function main() {
     }
   }
 
-  // Start GitHub sync loop in background
+  // Start GitHub sync loop in background (also handles leader coordination)
   if (config.github.enabled && config.github.syncEnabled) {
-    startSyncLoop(config, () => isRunning).catch(err => {
+    // Claim leadership on startup (first to claim wins)
+    writeLeaderClaim(config.github.repoPath, config.machine.id, config.machine.name);
+
+    startSyncLoop(config, () => isRunning,
+      // onHandoff: this machine should become leader
+      (pendingMessage) => {
+        if (!isLeader) {
+          console.log('👑 Handoff received — becoming leader (resuming polling)');
+          isLeader = true;
+        }
+        // Process the pending message that triggered the handoff
+        if (pendingMessage) {
+          console.log(`📨 Processing handed-off message in chat ${pendingMessage.chat_id} thread ${pendingMessage.thread_id}`);
+          const msg: ChannelMessage = {
+            id: `handoff-${Date.now()}`,
+            chatId: pendingMessage.chat_id,
+            threadId: pendingMessage.thread_id,
+            text: pendingMessage.text,
+            sender: {
+              id: '0',
+              displayName: pendingMessage.from_user || 'Unknown',
+              isBot: false,
+            },
+            timestamp: new Date(),
+            isThreaded: !!pendingMessage.thread_id && pendingMessage.thread_id !== '0',
+          };
+          processMessage(channel, channelConfig.type, msg, security, config).catch(err => {
+            console.error(`❌ Failed to process handed-off message: ${err}`);
+          });
+        }
+      },
+      // onYield: another machine claimed leadership
+      () => {
+        if (isLeader) {
+          console.log('📤 Another machine claimed leadership — yielding (sync-only mode)');
+          isLeader = false;
+        }
+      },
+    ).catch(err => {
       console.log(`⚠️ GitHub sync stopped: ${err}`);
     });
   }
@@ -256,6 +295,12 @@ async function main() {
 
   // Main polling loop
   while (isRunning) {
+    if (!isLeader) {
+      // Follower mode: just wait for handoff signal via sync loop
+      await sleep(5000);
+      continue;
+    }
+
     try {
       const messages = await channel.poll(config.telegram.pollTimeoutSeconds);
 
@@ -265,9 +310,9 @@ async function main() {
     } catch (error) {
       const errMsg = String(error);
       if (errMsg.includes('Conflict') || errMsg.includes('409') || errMsg.includes('terminated by other')) {
-        // Another instance is polling this bot — back off as follower
-        console.log('⚠️  Another instance is polling this bot. Waiting as follower (sync-only)...');
-        await sleep(30000); // 30s backoff before retrying
+        // Another instance is polling — yield leadership
+        console.log('⚠️  Another instance is polling this bot. Yielding to follower mode...');
+        isLeader = false;
       } else {
         console.error('❌ Polling error:', error);
         await sleep(config.telegram.pollIntervalMs * 5);
@@ -427,10 +472,36 @@ async function processMessageInner(
     sessionId = session.id;
     sessionName = session.name;
 
-    // Soft-route: if session belongs to a different machine, claim it (this machine is the active poller)
+    // Soft-route: if session belongs to a different machine, trigger handoff
     if (session.machine_id && session.machine_id !== config.machine.id) {
-      const prevOwner = session.machine_name || 'another machine';
-      console.log(`🔀 [${sessionName}] Claiming session from ${prevOwner} (${session.machine_id.slice(0, 8)}) → ${config.machine.name}`);
+      const targetName = session.machine_name || 'another machine';
+      const targetId = session.machine_id;
+
+      // If GitHub sync is enabled, trigger a leader handoff
+      if (config.github.enabled && config.github.syncEnabled) {
+        console.log(`🔀 [${sessionName}] Handing off to ${targetName} (${targetId.slice(0, 8)})`);
+        writeHandoffRequest(
+          config.github.repoPath,
+          config.machine.id, config.machine.name,
+          targetId, targetName,
+          `Message in session "${sessionName}" owned by ${targetName}`,
+          { chat_id: chatId, thread_id: threadId, text: prompt, from_user: message.sender?.displayName }
+        );
+        // Push handoff immediately so target picks it up fast
+        const { gitCommitAndPush: pushNow } = await import('./github/repo');
+        pushNow(config.github.repoPath, `handoff: ${config.machine.name} → ${targetName}`).catch(() => {});
+        // Yield leadership
+        isLeader = false;
+
+        await channel.send(chatId, `🔄 Routing to *${targetName}*... it will pick this up shortly.`, {
+          threadId: threadId !== '0' ? threadId : undefined,
+          format: 'markdown',
+        });
+        return;
+      }
+
+      // No sync repo — just claim and process locally
+      console.log(`🔀 [${sessionName}] Claiming session from ${targetName} (${targetId.slice(0, 8)}) → ${config.machine.name}`);
       claimSession(session.id, config.machine.id, config.machine.name);
     }
   }
@@ -836,8 +907,9 @@ async function syncChronicleToTopics(
           const timeInfo = `\n🕐 ${ts}`;
           const sessionInfo = `\n🔗 ${session.id}`;
           const lastMsg = session.lastMessage ? `\n\n💬 Last message:\n${session.lastMessage.slice(0, 300)}` : '';
+          const lastReply = session.lastAssistantMessage ? `\n\n🤖 Last reply:\n${session.lastAssistantMessage.slice(0, 300)}` : '';
           const resumeCmd = `\nResume: copilot --resume ${session.id}`;
-          const welcomeMsg = await channel.send(chatId, `📚 Session imported from Copilot CLI${dirInfo}${timeInfo}${sessionInfo}\n\n${fullSummary.slice(0, 200)}${lastMsg}\n\n${resumeCmd}\n\nContinue this session by sending a message here.`, {
+          const welcomeMsg = await channel.send(chatId, `📚 Session imported from Copilot CLI${dirInfo}${timeInfo}${sessionInfo}\n\n${fullSummary.slice(0, 200)}${lastMsg}${lastReply}\n\n${resumeCmd}\n\nContinue this session by sending a message here.`, {
             threadId: thread.threadId,
           });
           // Pin the welcome message (contains session ID)

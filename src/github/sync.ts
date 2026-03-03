@@ -2,6 +2,7 @@
  * GitHub Sync Loop
  * Periodically syncs local session data to the GitHub repo.
  * Runs every N seconds, exports sessions to JSON, commits & pushes if changes.
+ * Also handles leader coordination for multi-machine polling.
  */
 
 import * as fs from 'fs';
@@ -25,6 +26,103 @@ const syncState: SyncState = {
   lastError: null,
   syncCount: 0,
 };
+
+// Leader coordination
+export interface LeaderClaim {
+  machine_id: string;
+  machine_name: string;
+  claimed_at: string;
+}
+
+export interface HandoffRequest {
+  from_machine_id: string;
+  from_machine_name: string;
+  to_machine_id: string;
+  to_machine_name: string;
+  reason: string;
+  requested_at: string;
+  // Pending message that the target machine should process
+  pending_message?: {
+    chat_id: string;
+    thread_id: string;
+    text: string;
+    from_user?: string;
+  };
+}
+
+/**
+ * Write a leader claim to the sync repo
+ */
+export function writeLeaderClaim(repoPath: string, machineId: string, machineName: string): void {
+  const leaderPath = path.join(repoPath, 'memory', 'leader.json');
+  fs.mkdirSync(path.dirname(leaderPath), { recursive: true });
+  const claim: LeaderClaim = {
+    machine_id: machineId,
+    machine_name: machineName,
+    claimed_at: new Date().toISOString(),
+  };
+  fs.writeFileSync(leaderPath, JSON.stringify(claim, null, 2));
+}
+
+/**
+ * Read the current leader claim from the sync repo
+ */
+export function readLeaderClaim(repoPath: string): LeaderClaim | null {
+  const leaderPath = path.join(repoPath, 'memory', 'leader.json');
+  try {
+    return JSON.parse(fs.readFileSync(leaderPath, 'utf-8'));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Write a handoff request — asks a specific machine to become leader
+ */
+export function writeHandoffRequest(
+  repoPath: string,
+  fromId: string,
+  fromName: string,
+  toId: string,
+  toName: string,
+  reason: string,
+  pendingMessage?: HandoffRequest['pending_message']
+): void {
+  const handoffPath = path.join(repoPath, 'memory', 'handoff.json');
+  fs.mkdirSync(path.dirname(handoffPath), { recursive: true });
+  const request: HandoffRequest = {
+    from_machine_id: fromId,
+    from_machine_name: fromName,
+    to_machine_id: toId,
+    to_machine_name: toName,
+    reason,
+    requested_at: new Date().toISOString(),
+    pending_message: pendingMessage,
+  };
+  fs.writeFileSync(handoffPath, JSON.stringify(request, null, 2));
+}
+
+/**
+ * Read a pending handoff request
+ */
+export function readHandoffRequest(repoPath: string): HandoffRequest | null {
+  const handoffPath = path.join(repoPath, 'memory', 'handoff.json');
+  try {
+    return JSON.parse(fs.readFileSync(handoffPath, 'utf-8'));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Clear the handoff request (after it's been processed)
+ */
+export function clearHandoffRequest(repoPath: string): void {
+  const handoffPath = path.join(repoPath, 'memory', 'handoff.json');
+  try {
+    fs.unlinkSync(handoffPath);
+  } catch {}
+}
 
 /**
  * Export sessions to JSON files in the repo
@@ -110,8 +208,16 @@ export function getSyncState(): SyncState {
 
 /**
  * Start the git sync loop
+ * Also checks for leader handoff requests.
+ * onHandoff callback is called when this machine should become leader (with pending message if any).
+ * onYield callback is called when this machine should yield leadership.
  */
-export async function startSyncLoop(config: Config, isRunning: () => boolean): Promise<void> {
+export async function startSyncLoop(
+  config: Config,
+  isRunning: () => boolean,
+  onHandoff?: (pendingMessage?: HandoffRequest['pending_message']) => void,
+  onYield?: () => void,
+): Promise<void> {
   if (!config.github.enabled || !config.github.syncEnabled) {
     console.log('ℹ️ GitHub sync disabled');
     return;
@@ -129,6 +235,31 @@ export async function startSyncLoop(config: Config, isRunning: () => boolean): P
     try {
       // Pull first
       await gitPull(repoPath);
+
+      // Check for handoff requests
+      const handoff = readHandoffRequest(repoPath);
+      if (handoff) {
+        if (handoff.to_machine_id === config.machine.id) {
+          // We're being asked to become leader
+          console.log(`🔄 Handoff received from ${handoff.from_machine_name}: becoming leader`);
+          clearHandoffRequest(repoPath);
+          writeLeaderClaim(repoPath, config.machine.id, config.machine.name);
+          await gitCommitAndPush(repoPath, `leader: ${config.machine.name} (handoff from ${handoff.from_machine_name})`);
+          onHandoff?.(handoff.pending_message);
+        } else if (handoff.from_machine_id === config.machine.id) {
+          // We requested the handoff — yield
+          // (handoff file still present means target hasn't claimed yet, wait)
+        } else {
+          // Handoff between other machines, ignore
+        }
+      }
+
+      // Check leader claim — if another machine claimed leadership, yield
+      const leader = readLeaderClaim(repoPath);
+      if (leader && leader.machine_id !== config.machine.id) {
+        // Another machine is leader — if we were polling, yield
+        onYield?.();
+      }
 
       // Export local data
       const allSessions = getActiveSessions(100);

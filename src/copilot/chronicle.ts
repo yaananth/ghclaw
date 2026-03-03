@@ -22,6 +22,7 @@ export interface ChronicleSession {
   updated_at: string;
   turn_count?: number;
   lastMessage?: string | null;
+  lastAssistantMessage?: string | null;
 }
 
 export interface ChronicleCheckpoint {
@@ -106,9 +107,10 @@ function readSessionFromDir(sessionDir: string): ChronicleSession | null {
     const created_at = data.created_at || '';
     const updated_at = data.updated_at || '';
 
-    // Count user.message events and grab the last one
+    // Count user.message events and grab the last user + assistant messages
     let userMessageCount = 0;
     let lastMessage: string | null = null;
+    let lastAssistantMessage: string | null = null;
     const eventsPath = path.join(sessionDir, 'events.jsonl');
     try {
       if (fs.existsSync(eventsPath)) {
@@ -123,6 +125,13 @@ function readSessionFromDir(sessionDir: string): ChronicleSession | null {
                 const content = event.data.content as string;
                 const userLineMatch = content.match(/\nUser: (.+?)$/s);
                 lastMessage = userLineMatch ? userLineMatch[1].trim() : content.split('\n').pop()?.trim() || content;
+              }
+            } catch {}
+          } else if (line.includes('"assistant.message"')) {
+            try {
+              const event = JSON.parse(line);
+              if (event.data?.content) {
+                lastAssistantMessage = (event.data.content as string).slice(0, 500);
               }
             } catch {}
           }
@@ -140,6 +149,7 @@ function readSessionFromDir(sessionDir: string): ChronicleSession | null {
       updated_at,
       turn_count: userMessageCount,
       lastMessage,
+      lastAssistantMessage,
     };
   } catch {
     return null;
