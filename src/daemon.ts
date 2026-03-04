@@ -396,6 +396,7 @@ async function main() {
       { command: 'start', description: 'Welcome message' },
       { command: 'help', description: 'How to use ghclaw' },
       { command: 'new', description: 'Start a fresh session' },
+      { command: 'stop', description: 'Emergency stop the daemon' },
     ]);
     console.log('📋 Bot commands registered (natural language handles the rest)');
   }
@@ -523,7 +524,7 @@ async function processMessageInner(
   }
 
   // Kill switch: emergency stop the daemon
-  const killPatterns = /^(stop all|kill yourself|stop everything|emergency stop|shut ?down|ghclaw stop)$/i;
+  const killPatterns = /^(\/stop|stop all|kill yourself|stop everything|emergency stop|shut ?down|ghclaw stop)$/i;
   if (killPatterns.test(prompt.trim())) {
     console.log(`🛑 Kill switch triggered by ${user.id}: "${prompt.trim()}"`);
     await channel.send(chatId, '🛑 Kill switch activated. Shutting down...', {
