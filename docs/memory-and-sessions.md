@@ -193,7 +193,14 @@ Every 10 seconds:
      a. Create channel thread: "🤖 [MacBook] Mar01 2:14pm · myapp · Fix auth bug"
      b. Store mapping in session-mapper
      c. Send welcome message with session summary
-  6. Rate limit: max 3 new topics per cycle
+     d. Set synced_turn_count to current count (prevents backfill of existing turns)
+  6. Sync incremental turns for existing topics:
+     a. Compare synced_turn_count vs current Chronicle turn count per session
+     b. Post only NEW turns (user message + assistant response pairs)
+     c. Rate limit: max 6 messages per cycle, 3 per session, 300ms spacing
+  7. Rate limit: max 3 new topics per cycle
+
+**Dedup prevention:** After sending a direct response to a user message, the daemon calls `ensureSyncedRow(sessionId, currentTurns + 1)` to mark those turns as already posted. This prevents the background sync loop from re-posting the same content. The `+1` accounts for Chronicle not having flushed the new turn yet.
 ```
 
 Note: ghclaw's own `-p` sessions (title generation, schedule parsing) are caught by the bot session summary filter. User's own terminal `-p` sessions are intentionally included since they're indistinguishable from interactive single-question sessions and are worth surfacing.
@@ -250,13 +257,15 @@ Message arrives at Leader machine
     ├── session owner === my machine_id?
     │       │
     │       YES → Process with Copilot CLI
-    │       NO  → Trigger handoff:
-    │               1. Write memory/handoff.json (target + pending message + sender ID)
-    │               2. Update memory/leader.json to point to target
-    │               3. Yield leadership (stop polling, enter follower mode)
-    │               4. Sync loop commits both files within ~5s
-    │               5. Target machine's sync loop detects handoff
-    │               6. Target claims leadership, processes message, deletes handoff.json
+    │       NO  → Check if target is alive (leader.json claim < 2 min old):
+    │               ├─ DEAD  → Claim session locally, process normally
+    │               └─ ALIVE → Trigger handoff:
+    │                   1. Write memory/handoff.json (target + pending message + sender ID)
+    │                   2. Update memory/leader.json to point to target
+    │                   3. Yield leadership (stop polling, enter follower mode)
+    │                   4. Sync loop commits both files within ~5s
+    │                   5. Target machine's sync loop detects handoff
+    │                   6. Target claims leadership, processes message, deletes handoff.json
     │
     └── No existing session?
             │

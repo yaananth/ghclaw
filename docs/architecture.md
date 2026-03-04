@@ -210,7 +210,11 @@ A **Channel Registry** (`src/channels/registry.ts`) auto-detects configured chan
     ├─▶ Validate against schema (allowlisted types + fields)
     └─▶ executeAction() → handler result sent as follow-up
 
-12. Clear 👀 reaction (if channel supports it)
+12. Mark Chronicle turns synced (prevent duplicate messages)
+    ├─▶ ensureSyncedRow(sessionId, currentTurns + 1)
+    └─▶ Background Chronicle sync loop skips already-posted turns
+
+13. Clear 👀 reaction (if channel supports it)
 ```
 
 ### GitHub Sync
@@ -357,11 +361,13 @@ A machine transitions to follower on:
 
 ### Leader Handoff
 
-When the leader receives a message for a session owned by a different machine, it triggers a **handoff**:
+When the leader receives a message for a session owned by a different machine, it first checks if the target is alive before handing off:
 
 1. Leader looks up session ownership via local SQLite + sync repo machine files
 2. Detects mismatch: session belongs to another machine
-3. Writes `memory/handoff.json`:
+3. **Liveness check**: reads `leader.json` — target is alive only if it's the current leader with a claim < 2 minutes old (leader refreshes every 30s)
+4. **If target is dead/stopped**: claims the session locally and processes normally (no handoff to a ghost)
+5. **If target is alive**: writes `memory/handoff.json`:
    ```json
    {
      "from_machine_id": "uuid-of-leader",
@@ -379,9 +385,9 @@ When the leader receives a message for a session owned by a different machine, i
      }
    }
    ```
-4. Updates `leader.json` to point to the target machine
-5. Yields leadership (stops polling, enters follower mode)
-6. Does NOT push separately — the sync loop commits both files within ~5 seconds
+6. Updates `leader.json` to point to the target machine
+7. Yields leadership (stops polling, enters follower mode)
+8. Does NOT push separately — the sync loop commits both files within ~5 seconds
 
 The target machine's sync loop detects the handoff, claims leadership, runs a full security check on the pending message, processes it, and deletes `handoff.json`.
 
