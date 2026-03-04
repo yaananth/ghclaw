@@ -530,6 +530,27 @@ program
       console.log('⚠️  Link failed:', link.stderr?.toString().trim());
     }
 
+    // Patch wrapper to source Codespace secrets in non-login shells
+    const wrapperPaths = [
+      '/usr/local/bin/ghclaw',
+      `${process.env.HOME}/.local/bin/ghclaw`,
+      `${process.env.HOME}/.bun/bin/ghclaw`,
+    ];
+    const WRAPPER_CONTENT = `#!/usr/bin/env bash
+# Source Codespace secrets when running in a non-login shell (e.g. gh cs ssh -- ghclaw ...)
+if [ "\${CODESPACES:-}" = "true" ] && [ -z "\${TELEGRAM_BOT_TOKEN:-}" ] && [ -f /workspaces/.codespaces/shared/.env ]; then
+  set -a; source /workspaces/.codespaces/shared/.env; set +a
+fi
+exec "$HOME/.bun/bin/bun" run "\${GHCLAW_INSTALL_DIR:-$HOME/.ghclaw-src}/bin/ghclaw.ts" "$@"
+`;
+    for (const wp of wrapperPaths) {
+      try {
+        if (fs.existsSync(wp) && !fs.lstatSync(wp).isSymbolicLink()) {
+          fs.writeFileSync(wp, WRAPPER_CONTENT, { mode: 0o755 });
+        }
+      } catch {}
+    }
+
     // Run health check in a fresh process (so it uses the newly-pulled code)
     // Doctor exits 1 only on errors (not warnings), but also handle unexpected exit codes
     console.log('\n🩺 Running health check...');
