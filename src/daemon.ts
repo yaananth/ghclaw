@@ -654,8 +654,20 @@ async function processMessageInner(
       const targetName = effectiveMachineName || 'another machine';
       const targetId = effectiveMachineId;
 
-      // If GitHub sync is enabled, trigger a leader handoff
+      // Check if the target machine is actually alive before handing off.
+      // A machine is considered alive if it's the current leader with a recent claim (< 2 min).
+      // If the target is dead/stopped, just claim the session locally instead of routing to a ghost.
+      let targetAlive = false;
       if (config.github.enabled && config.github.syncEnabled) {
+        const leader = readLeaderClaim(config.github.repoPath);
+        if (leader && leader.machine_id === targetId) {
+          const claimAge = Date.now() - new Date(leader.claimed_at).getTime();
+          targetAlive = claimAge < 120_000; // 2 minutes (leader refreshes every 30s)
+        }
+      }
+
+      if (targetAlive && config.github.enabled && config.github.syncEnabled) {
+        // Target is alive — trigger a leader handoff
         console.log(`🔀 [${sessionName}] Handing off to ${targetName} (${targetId.slice(0, 8)})`);
         writeHandoffRequest(
           config.github.repoPath,
@@ -678,8 +690,8 @@ async function processMessageInner(
         return;
       }
 
-      // No sync repo — just claim and process locally
-      console.log(`🔀 [${sessionName}] Claiming session from ${targetName} (${targetId.slice(0, 8)}) → ${config.machine.name}`);
+      // Target is not alive or no sync repo — claim and process locally
+      console.log(`🔀 [${sessionName}] ${targetAlive ? 'No sync repo' : `Target ${targetName} not alive`} — claiming locally`);
       claimSession(session.id, config.machine.id, config.machine.name);
     }
   }
@@ -812,6 +824,13 @@ async function processMessageInner(
     if (!override) {
       const session = getOrCreateSession(chatIdNum, parseInt(targetThreadId) || 0, topicName, config.machine.id, config.machine.name);
       updateSessionActivity(session.id);
+    }
+
+    // Mark Chronicle turns as synced so background sync doesn't re-post them.
+    // Add +1 because Chronicle may not have flushed the new turn to events.jsonl yet.
+    if (sessionId) {
+      const currentTurns = getSessionTurnCount(sessionId);
+      ensureSyncedRow(sessionId, currentTurns + 1);
     }
 
     console.log(`✅ [${sessionName}] Response sent${createdTopic ? ' (in new topic)' : ''}${parsed.actions.length > 0 ? ` + ${parsed.actions.length} action(s)` : ''}`);
