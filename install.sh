@@ -72,6 +72,10 @@ echo "📦 Installing dependencies..."
 # 6. Create launcher script
 # Use $HOME-relative paths so it works regardless of PATH configuration
 LAUNCHER_CONTENT='#!/usr/bin/env bash
+# Source Codespace secrets when running in a non-login shell (e.g. gh cs ssh -- ghclaw ...)
+if [ "${CODESPACES:-}" = "true" ] && [ -z "${TELEGRAM_BOT_TOKEN:-}" ] && [ -f /workspaces/.codespaces/shared/.env ]; then
+  set -a; source /workspaces/.codespaces/shared/.env; set +a
+fi
 exec "$HOME/.bun/bin/bun" run "${GHCLAW_INSTALL_DIR:-$HOME/.ghclaw-src}/bin/ghclaw.ts" "$@"'
 
 BIN_DIR=""
