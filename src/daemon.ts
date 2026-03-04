@@ -29,6 +29,7 @@ import {
   addSyncedSessionId,
   getSyncedTurnCount,
   updateSyncedTurnCount,
+  ensureSyncedRow,
 } from './memory/session-mapper';
 import {
   handleCommand,
@@ -519,6 +520,18 @@ async function processMessageInner(
   // Acknowledge receipt immediately with 👀 reaction (if supported)
   if (channel.setReaction) {
     channel.setReaction(chatId, message.id, '👀');
+  }
+
+  // Kill switch: emergency stop the daemon
+  const killPatterns = /^(stop all|kill yourself|stop everything|emergency stop|shut ?down|ghclaw stop)$/i;
+  if (killPatterns.test(prompt.trim())) {
+    console.log(`🛑 Kill switch triggered by ${user.id}: "${prompt.trim()}"`);
+    await channel.send(chatId, '🛑 Kill switch activated. Shutting down...', {
+      threadId: threadId !== '0' ? threadId : undefined,
+    });
+    // Give the message time to send, then exit (SIGTERM handler does cleanup)
+    setTimeout(() => process.exit(0), 500);
+    return;
   }
 
   // Check if it's a command
@@ -1047,6 +1060,13 @@ async function syncIncrementalMessages(
     const currentCount = getSessionTurnCount(session.id);
 
     if (currentCount <= syncedCount) continue;
+
+    // Pre-existing session from before incremental sync — initialize baseline without backfilling.
+    // Also handles sessions with no row in synced_chronicle_sessions (ensure row exists).
+    if (syncedCount === 0 && currentCount > 0) {
+      ensureSyncedRow(session.id, currentCount);
+      continue;
+    }
 
     const maxPerSession = Math.min(3, maxPerCycle - totalSent);
     const newPairs = getMessagesAfterTurn(session.id, syncedCount, maxPerSession);

@@ -430,3 +430,13 @@ export function updateSyncedTurnCount(sessionId: string, count: number): void {
   const db = initDatabase();
   db.prepare('UPDATE synced_chronicle_sessions SET synced_turn_count = ?, synced_at = datetime(\'now\') WHERE session_id = ?').run(count, sessionId);
 }
+
+/**
+ * Ensure a row exists in synced_chronicle_sessions and set its turn count.
+ * INSERT OR IGNORE + UPDATE avoids races and handles both new and existing rows.
+ */
+export function ensureSyncedRow(sessionId: string, turnCount: number): void {
+  const db = initDatabase();
+  db.prepare('INSERT OR IGNORE INTO synced_chronicle_sessions (session_id, synced_turn_count) VALUES (?, ?)').run(sessionId, turnCount);
+  db.prepare('UPDATE synced_chronicle_sessions SET synced_turn_count = ?, synced_at = datetime(\'now\') WHERE session_id = ? AND synced_turn_count < ?').run(turnCount, sessionId, turnCount);
+}
