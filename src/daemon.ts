@@ -96,7 +96,7 @@ interface PendingMachinePick {
   timestamp: number;
 }
 const pendingMachinePicks = new Map<string, PendingMachinePick>();
-const MACHINE_PICK_TIMEOUT_MS = 120_000; // 2 min to pick
+const MACHINE_PICK_TIMEOUT_MS = 300_000; // 5 min to pick
 
 // Dedup: track recently processed messages to prevent double-processing.
 // When a handoff fires, the pending message arrives via BOTH onHandoff callback
@@ -616,49 +616,41 @@ async function processMessageInner(
   if (pendingPick) {
     pendingMachinePicks.delete(machinePickKey);
 
-    // Expired?
-    if (Date.now() - pendingPick.timestamp > MACHINE_PICK_TIMEOUT_MS) {
-      console.log(`⏰ Machine pick expired for ${machinePickKey} — processing on current machine`);
-      // Fall through to normal processing with the ORIGINAL prompt
-      prompt = pendingPick.originalPrompt;
-    } else {
-      const trimmed = prompt.trim();
-      const pickNum = parseInt(trimmed, 10);
+    const trimmed = prompt.trim();
+    const pickNum = parseInt(trimmed, 10);
 
-      if (pickNum >= 1 && pickNum <= pendingPick.machines.length) {
-        const picked = pendingPick.machines[pickNum - 1];
+    if (pickNum >= 1 && pickNum <= pendingPick.machines.length) {
+      const picked = pendingPick.machines[pickNum - 1];
 
-        if (picked.isCurrent) {
-          // User picked current machine — process normally with original prompt
-          console.log(`💻 User picked current machine: ${picked.machineName}`);
-          prompt = pendingPick.originalPrompt;
-          // Fall through to normal processing
-        } else {
-          // User picked a different machine — handoff
-          console.log(`🔄 User picked ${picked.machineName} — handing off`);
-
-          if (config.github?.enabled && config.github.repoPath) {
-            writeHandoffRequest(
-              config.github.repoPath,
-              config.machine.id, config.machine.name,
-              picked.machineId, picked.machineName,
-              `User selected ${picked.machineName} for: ${pendingPick.originalPrompt.slice(0, 100)}`,
-              { chat_id: chatId, thread_id: threadId, text: pendingPick.originalPrompt, from_user: message.sender?.displayName, from_user_id: message.sender?.id }
-            );
-            writeLeaderClaim(config.github.repoPath, picked.machineId, picked.machineName);
-          }
-
-          await channel.send(chatId, `🔄 Routing to *${picked.machineName}*... it will pick this up shortly.`, {
-            threadId: threadId !== '0' ? threadId : undefined,
-            format: 'markdown',
-          });
-          return;
-        }
+      if (picked.isCurrent) {
+        // User picked current machine — process normally with original prompt
+        console.log(`💻 User picked current machine: ${picked.machineName}`);
+        prompt = pendingPick.originalPrompt;
+        // Fall through to normal processing
       } else {
-        // Not a number — treat as "don't care", process on current machine with this new message as the prompt
-        console.log(`💻 Non-numeric reply to machine picker — processing on current machine`);
-        // Use the NEW message as the prompt (user moved on)
+        // User picked a different machine — handoff
+        console.log(`🔄 User picked ${picked.machineName} — handing off`);
+
+        if (config.github?.enabled && config.github.repoPath) {
+          writeHandoffRequest(
+            config.github.repoPath,
+            config.machine.id, config.machine.name,
+            picked.machineId, picked.machineName,
+            `User selected ${picked.machineName} for: ${pendingPick.originalPrompt.slice(0, 100)}`,
+            { chat_id: chatId, thread_id: threadId, text: pendingPick.originalPrompt, from_user: message.sender?.displayName, from_user_id: message.sender?.id }
+          );
+          writeLeaderClaim(config.github.repoPath, picked.machineId, picked.machineName);
+        }
+
+        await channel.send(chatId, `🔄 Routing to *${picked.machineName}*... it will pick this up shortly.`, {
+          threadId: threadId !== '0' ? threadId : undefined,
+          format: 'markdown',
+        });
+        return;
       }
+    } else {
+      // Not a number — treat as "don't care", process on current machine with this new message as the prompt
+      console.log(`💻 Non-numeric reply to machine picker — processing on current machine`);
     }
   }
 
