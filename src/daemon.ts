@@ -88,6 +88,16 @@ function escapeMarkdown(text: string): string {
 // Key: "chatId:threadId", Value: Copilot session ID or "__new__" for fresh session
 const sessionOverrides = new Map<string, string>();
 
+// Machine picker: pending machine selection for new sessions
+// Key: "chatId:threadId", Value: { originalPrompt, machines, timestamp }
+interface PendingMachinePick {
+  originalPrompt: string;
+  machines: Array<{ machineName: string; machineId: string; isCurrent: boolean }>;
+  timestamp: number;
+}
+const pendingMachinePicks = new Map<string, PendingMachinePick>();
+const MACHINE_PICK_TIMEOUT_MS = 120_000; // 2 min to pick
+
 // Dedup: track recently processed messages to prevent double-processing.
 // When a handoff fires, the pending message arrives via BOTH onHandoff callback
 // AND Telegram poll (offset wasn't acknowledged by the sender before yielding).
@@ -600,6 +610,58 @@ async function processMessageInner(
     return;
   }
 
+  // Check if it's a machine pick response (number reply to machine picker)
+  const machinePickKey = getChatKey(chatId, threadId);
+  const pendingPick = pendingMachinePicks.get(machinePickKey);
+  if (pendingPick) {
+    pendingMachinePicks.delete(machinePickKey);
+
+    // Expired?
+    if (Date.now() - pendingPick.timestamp > MACHINE_PICK_TIMEOUT_MS) {
+      console.log(`⏰ Machine pick expired for ${machinePickKey} — processing on current machine`);
+      // Fall through to normal processing with the ORIGINAL prompt
+      prompt = pendingPick.originalPrompt;
+    } else {
+      const trimmed = prompt.trim();
+      const pickNum = parseInt(trimmed, 10);
+
+      if (pickNum >= 1 && pickNum <= pendingPick.machines.length) {
+        const picked = pendingPick.machines[pickNum - 1];
+
+        if (picked.isCurrent) {
+          // User picked current machine — process normally with original prompt
+          console.log(`💻 User picked current machine: ${picked.machineName}`);
+          prompt = pendingPick.originalPrompt;
+          // Fall through to normal processing
+        } else {
+          // User picked a different machine — handoff
+          console.log(`🔄 User picked ${picked.machineName} — handing off`);
+
+          if (config.github?.enabled && config.github.repoPath) {
+            writeHandoffRequest(
+              config.github.repoPath,
+              config.machine.id, config.machine.name,
+              picked.machineId, picked.machineName,
+              `User selected ${picked.machineName} for: ${pendingPick.originalPrompt.slice(0, 100)}`,
+              { chat_id: chatId, thread_id: threadId, text: pendingPick.originalPrompt, from_user: message.sender?.displayName, from_user_id: message.sender?.id }
+            );
+            writeLeaderClaim(config.github.repoPath, picked.machineId, picked.machineName);
+          }
+
+          await channel.send(chatId, `🔄 Routing to *${picked.machineName}*... it will pick this up shortly.`, {
+            threadId: threadId !== '0' ? threadId : undefined,
+            format: 'markdown',
+          });
+          return;
+        }
+      } else {
+        // Not a number — treat as "don't care", process on current machine with this new message as the prompt
+        console.log(`💻 Non-numeric reply to machine picker — processing on current machine`);
+        // Use the NEW message as the prompt (user moved on)
+      }
+    }
+  }
+
   // Get topic name if available (Telegram-specific, from raw message)
   let topicName: string | undefined;
   if (isForum && message.raw) {
@@ -751,6 +813,42 @@ async function processMessageInner(
     }
   }
 
+  // Machine picker: if new topic AND multiple alive machines, ask user to choose
+  if (createdTopic && config.github?.enabled && config.github.repoPath) {
+    try {
+      const machines = listAllMachines(config.github.repoPath);
+      const aliveMachines = machines.filter(m => m.isAlive);
+      if (aliveMachines.length > 1) {
+        const machineChoices = aliveMachines.map(m => ({
+          machineName: m.machineName,
+          machineId: m.machineId,
+          isCurrent: m.machineId === config.machine.id,
+        }));
+
+        const pickerKey = getChatKey(chatId, targetThreadId);
+        pendingMachinePicks.set(pickerKey, {
+          originalPrompt: prompt,
+          machines: machineChoices,
+          timestamp: Date.now(),
+        });
+
+        let msg = `💻 *Multiple machines available:*\n\n`;
+        machineChoices.forEach((m, i) => {
+          msg += `${i + 1}. *${m.machineName}*${m.isCurrent ? ' ← current' : ''}\n`;
+        });
+        msg += `\n_Reply with a number to pick, or just send your message to use current._`;
+
+        await channel.send(chatId, msg, {
+          threadId: targetThreadId !== '0' ? targetThreadId : undefined,
+          format: 'markdown',
+        });
+
+        console.log(`💻 Machine picker sent for ${pickerKey} (${aliveMachines.length} alive)`);
+        return; // Wait for user's reply
+      }
+    } catch { /* no machine picker if sync unavailable */ }
+  }
+
   // Log AFTER security check - redact potential secrets
   const redactedPrompt = prompt
     .replace(/[a-zA-Z0-9_-]{20,}/g, '[REDACTED]')  // Long tokens
@@ -775,28 +873,7 @@ async function processMessageInner(
       'See AGENTS.md for all available actions. Always emit the action block — never answer these yourself.',
     ].join(' ');
 
-    // Always provide machine context when multiple alive machines exist — LLM decides when to ask
-    let machinePrompt = '';
-    if (config.github?.enabled && config.github.repoPath) {
-      try {
-        const machines = listAllMachines(config.github.repoPath);
-        const aliveMachines = machines.filter(m => m.isAlive);
-        if (aliveMachines.length > 1) {
-          const machineList = aliveMachines.map(m =>
-            `- ${m.machineName}${m.machineId === config.machine.id ? ' (current)' : ''}`
-          ).join('\n');
-          machinePrompt = [
-            '\n\n[Machine Context: Multiple machines are online right now.',
-            `You are running on ${config.machine.name}.`,
-            'If the user\'s request could benefit from a specific machine, mention the available machines and ask which one should handle it.',
-            'Use your judgment — trivial requests don\'t need a machine choice.',
-            `\nAvailable machines:\n${machineList}]`,
-          ].join(' ');
-        }
-      } catch { /* no machine context if sync unavailable */ }
-    }
-
-    const fullPrompt = `[System: ${actionReminder}]${machinePrompt}\n\nUser message: ${prompt}`;
+    const fullPrompt = `[System: ${actionReminder}]\n\nUser message: ${prompt}`;
 
     // Execute with Copilot CLI, resuming the session if we have one
     const parsedTargetThread = parseInt(targetThreadId, 10);
