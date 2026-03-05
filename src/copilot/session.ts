@@ -10,6 +10,7 @@
 
 import { getGhToken } from '../github/auth';
 import { getConfigDir } from '../config';
+import * as fs from 'fs';
 
 export interface SessionOptions {
   model?: string;
@@ -24,6 +25,33 @@ export interface SessionOptions {
 export interface StreamChunk {
   type: 'text' | 'tool_call' | 'tool_result' | 'done' | 'error';
   content: string;
+}
+
+/**
+ * Resolve a sensible default working directory for Copilot CLI.
+ * - Codespaces: use /workspaces/<repo> if exactly one workspace exists, else /workspaces/
+ * - Otherwise: user's home directory
+ */
+function getDefaultWorkingDir(): string {
+  if (process.env.CODESPACES === 'true') {
+    const wsRoot = '/workspaces';
+    try {
+      const entries = fs.readdirSync(wsRoot).filter(e => {
+        try { return fs.statSync(`${wsRoot}/${e}`).isDirectory(); } catch { return false; }
+      });
+      if (entries.length === 1) {
+        const dir = `${wsRoot}/${entries[0]}`;
+        console.log(`   [cwd] Codespace detected — using workspace: ${dir}`);
+        return dir;
+      }
+      if (entries.length > 1) {
+        console.log(`   [cwd] Codespace detected — multiple workspaces, using ${wsRoot}`);
+        return wsRoot;
+      }
+    } catch { /* fall through */ }
+    return wsRoot;
+  }
+  return process.env.HOME || '/tmp';
 }
 
 /**
@@ -66,7 +94,7 @@ export async function* executePrompt(
   const proc = Bun.spawn([cliPath, ...args], {
     stdout: 'pipe',
     stderr: 'pipe',
-    cwd: options.workingDir || process.env.HOME,
+    cwd: options.workingDir || getDefaultWorkingDir(),
     env: {
       ...process.env,
       GITHUB_TOKEN: (await getGhToken()) || '',
