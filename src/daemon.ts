@@ -760,9 +760,21 @@ async function processMessageInner(
   console.log(`📩 [${sessionName}] user:${user.id}: ${logText}`);
 
   try {
-    // Instructions are in .github/copilot-instructions.md (written on startup)
-    // Copilot CLI reads them automatically — just send the user's message
-    const fullPrompt = prompt;
+    // Reinforce action block usage inline — AGENTS.md provides full docs but
+    // the LLM often ignores them in favor of native tools. This prefix ensures
+    // the LLM outputs structured action blocks that daemon.ts can parse & execute.
+    const actionReminder = [
+      'IMPORTANT: You are ghclaw. When the user asks about machines, models, reminders, schedules, sessions, status, or coding tasks,',
+      'you MUST respond with a ```json:ghclaw-action``` fenced code block at the end of your message.',
+      'Do NOT use your own tools (bash, sql, grep, etc.) to answer these — the action block handler does it.',
+      'Key actions: "list machines" → {"action":"list_machines"}, "show status" → {"action":"show_status"},',
+      '"remind me X" → {"action":"create_reminder","message":"X","schedule":"..."},',
+      '"list sessions" → {"action":"list_sessions"},',
+      '"use/switch to opus" → {"action":"set_model","model":"claude-opus-4.5"},',
+      '"route to X" → {"action":"route_to_machine","machine_name":"X"}.',
+      'See AGENTS.md for all available actions. Always emit the action block — never answer these yourself.',
+    ].join(' ');
+    const fullPrompt = `[System: ${actionReminder}]\n\nUser message: ${prompt}`;
 
     // Execute with Copilot CLI, resuming the session if we have one
     const parsedTargetThread = parseInt(targetThreadId, 10);

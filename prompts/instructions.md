@@ -137,6 +137,7 @@ When there are multiple machines available and the user starts a task that might
 
 ### Guidelines
 
+- **MANDATORY: When a user request matches ANY action above, you MUST include the action block. Do NOT use bash, sql, grep, task, store_memory, or any other Copilot CLI tool to fulfill these requests yourself.** The action blocks are parsed and executed by the ghclaw daemon which has the real implementation. Your job is to emit the block — not to answer the question yourself.
 - Include at most ONE action block per response
 - Place the action block at the very end, after your conversational response
 - Your conversational text should confirm what you're about to do (e.g., "Setting a reminder for tomorrow at 9am to deploy v2")

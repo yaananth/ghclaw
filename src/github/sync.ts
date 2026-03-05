@@ -332,6 +332,17 @@ export function listAllMachines(repoPath: string): MachineInfo[] {
         ? Date.now() - new Date(data.updatedAt).getTime()
         : Infinity;
       const isAlive = (isLeaderMachine && leaderAlive) || machineFileAge < 120_000;
+
+      // Auto-prune stale machines: offline > 24h with 0 sessions
+      const STALE_THRESHOLD_MS = 24 * 60 * 60 * 1000; // 24 hours
+      if (!isAlive && (data.sessionCount || 0) === 0 && machineFileAge > STALE_THRESHOLD_MS) {
+        try {
+          fs.unlinkSync(path.join(machinesDir, file));
+          console.log(`🗑️ Pruned stale machine: ${data.machineName || machineId} (offline ${Math.round(machineFileAge / 3600000)}h, 0 sessions)`);
+        } catch { /* ignore cleanup errors */ }
+        continue;
+      }
+
       machines.push({
         machineId,
         machineName: data.machineName || 'unknown',
