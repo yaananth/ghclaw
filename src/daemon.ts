@@ -775,9 +775,9 @@ async function processMessageInner(
       'See AGENTS.md for all available actions. Always emit the action block — never answer these yourself.',
     ].join(' ');
 
-    // For new sessions with multiple alive machines, ask user to pick one
+    // Always provide machine context when multiple alive machines exist — LLM decides when to ask
     let machinePrompt = '';
-    if (createdTopic && config.github?.enabled && config.github.repoPath) {
+    if (config.github?.enabled && config.github.repoPath) {
       try {
         const machines = listAllMachines(config.github.repoPath);
         const aliveMachines = machines.filter(m => m.isAlive);
@@ -786,10 +786,11 @@ async function processMessageInner(
             `- ${m.machineName}${m.machineId === config.machine.id ? ' (current)' : ''}`
           ).join('\n');
           machinePrompt = [
-            '\n\n[Machine Context: Multiple machines are available.',
-            'Before answering the user\'s request, briefly list these machines and ask which one should handle this task.',
-            'Do NOT emit any action block yet — just ask the question and wait for their reply.',
-            `If the request is trivial (greeting, simple question), skip the machine question and answer directly.\nAvailable machines:\n${machineList}]`,
+            '\n\n[Machine Context: Multiple machines are online right now.',
+            `You are running on ${config.machine.name}.`,
+            'If the user\'s request could benefit from a specific machine, mention the available machines and ask which one should handle it.',
+            'Use your judgment — trivial requests don\'t need a machine choice.',
+            `\nAvailable machines:\n${machineList}]`,
           ].join(' ');
         }
       } catch { /* no machine context if sync unavailable */ }
