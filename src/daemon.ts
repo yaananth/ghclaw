@@ -94,6 +94,8 @@ interface PendingMachinePick {
   originalPrompt: string;
   machines: Array<{ machineName: string; machineId: string; isCurrent: boolean }>;
   timestamp: number;
+  userId: string;  // Who sent the original message
+  topicThreadId: string;  // The topic where the picker was sent
 }
 const pendingMachinePicks = new Map<string, PendingMachinePick>();
 const MACHINE_PICK_TIMEOUT_MS = 300_000; // 5 min to pick
@@ -753,7 +755,19 @@ async function processMessageInner(
   }
 
   // Auto-create topic for forum groups if message is in main chat (General)
+  // But first: if user has a pending machine pick in another topic, redirect there
   let targetThreadId = threadId;
+  if (isForum && threadId === '0') {
+    for (const [key, pick] of pendingMachinePicks.entries()) {
+      if (pick.userId === user.id && key.startsWith(chatId + ':')) {
+        // This user has a pending pick — redirect to that topic
+        console.log(`🔀 Redirecting General reply to pending machine pick in topic ${pick.topicThreadId}`);
+        threadId = pick.topicThreadId;
+        targetThreadId = pick.topicThreadId;
+        break;
+      }
+    }
+  }
   if (isForum && threadId === '0' && !override && channel.createThread) {
     try {
       // Create topic with placeholder name (instant, don't block on AI)
@@ -822,6 +836,8 @@ async function processMessageInner(
           originalPrompt: prompt,
           machines: machineChoices,
           timestamp: Date.now(),
+          userId: user.id,
+          topicThreadId: targetThreadId,
         });
 
         let msg = `💻 *Multiple machines available:*\n\n`;
