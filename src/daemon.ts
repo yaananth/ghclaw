@@ -774,7 +774,28 @@ async function processMessageInner(
       '"route to X" → {"action":"route_to_machine","machine_name":"X"}.',
       'See AGENTS.md for all available actions. Always emit the action block — never answer these yourself.',
     ].join(' ');
-    const fullPrompt = `[System: ${actionReminder}]\n\nUser message: ${prompt}`;
+
+    // For new sessions with multiple alive machines, ask user to pick one
+    let machinePrompt = '';
+    if (createdTopic && config.github?.enabled && config.github.repoPath) {
+      try {
+        const machines = listAllMachines(config.github.repoPath);
+        const aliveMachines = machines.filter(m => m.isAlive);
+        if (aliveMachines.length > 1) {
+          const machineList = aliveMachines.map(m =>
+            `- ${m.machineName}${m.machineId === config.machine.id ? ' (current)' : ''}`
+          ).join('\n');
+          machinePrompt = [
+            '\n\n[Machine Context: Multiple machines are available.',
+            'Before answering the user\'s request, briefly list these machines and ask which one should handle this task.',
+            'Do NOT emit any action block yet — just ask the question and wait for their reply.',
+            `If the request is trivial (greeting, simple question), skip the machine question and answer directly.\nAvailable machines:\n${machineList}]`,
+          ].join(' ');
+        }
+      } catch { /* no machine context if sync unavailable */ }
+    }
+
+    const fullPrompt = `[System: ${actionReminder}]${machinePrompt}\n\nUser message: ${prompt}`;
 
     // Execute with Copilot CLI, resuming the session if we have one
     const parsedTargetThread = parseInt(targetThreadId, 10);
