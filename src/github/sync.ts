@@ -297,6 +297,58 @@ export function importSessionsFromRepo(repoPath: string): { machines: string[]; 
 }
 
 /**
+ * List all known machines from the sync repo.
+ * Reads memory/machines/*.json and cross-references leader.json for liveness.
+ */
+export interface MachineInfo {
+  machineId: string;
+  machineName: string;
+  updatedAt: string;
+  sessionCount: number;
+  isLeader: boolean;
+  isAlive: boolean;  // true if leader with recent heartbeat OR machine file updated < 2 min ago
+}
+
+export function listAllMachines(repoPath: string): MachineInfo[] {
+  const machinesDir = path.join(repoPath, 'memory', 'machines');
+  if (!fs.existsSync(machinesDir)) return [];
+
+  const leader = readLeaderClaim(repoPath);
+  const leaderAlive = leader
+    ? (Date.now() - new Date(leader.claimed_at).getTime()) < 120_000
+    : false;
+
+  const files = fs.readdirSync(machinesDir).filter(f => f.endsWith('.json'));
+  const machines: MachineInfo[] = [];
+
+  for (const file of files) {
+    try {
+      const data = JSON.parse(fs.readFileSync(path.join(machinesDir, file), 'utf-8'));
+      const machineId = data.machineId || file.replace('.json', '');
+      const isLeaderMachine = leader?.machine_id === machineId;
+      // A machine is alive if it's the current leader with a recent heartbeat,
+      // OR if its machine file was updated recently (non-leaders still export data via sync loop)
+      const machineFileAge = data.updatedAt
+        ? Date.now() - new Date(data.updatedAt).getTime()
+        : Infinity;
+      const isAlive = (isLeaderMachine && leaderAlive) || machineFileAge < 120_000;
+      machines.push({
+        machineId,
+        machineName: data.machineName || 'unknown',
+        updatedAt: data.updatedAt || '',
+        sessionCount: data.sessionCount || 0,
+        isLeader: isLeaderMachine,
+        isAlive,
+      });
+    } catch {
+      // Skip corrupt files
+    }
+  }
+
+  return machines;
+}
+
+/**
  * Get current sync state
  */
 export function getSyncState(): SyncState {

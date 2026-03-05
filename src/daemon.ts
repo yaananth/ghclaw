@@ -25,6 +25,7 @@ import {
   createSessionWithTopic,
   getSessionMachine,
   claimSession,
+  getSessionModel,
   getSyncedSessionIds,
   addSyncedSessionId,
   getSyncedTurnCount,
@@ -40,7 +41,7 @@ import {
 import { isChronicleAvailable, getChronicleStats, getRecentSessions as getChronicleRecentSessions, getSessionTurnCount, getMessagesAfterTurn, type ChronicleMessagePair } from './copilot/chronicle';
 import { parseActionBlocks, executeAction } from './actions';
 import { getGhToken } from './github/auth';
-import { startSyncLoop, writeLeaderClaim, writeHandoffRequest, readLeaderClaim, removeLeaderClaim, lookupSessionOwner } from './github/sync';
+import { startSyncLoop, writeLeaderClaim, writeHandoffRequest, readLeaderClaim, removeLeaderClaim, lookupSessionOwner, listAllMachines } from './github/sync';
 import { gitCommitAndPush } from './github/repo';
 import { getVersion, getCommitHash } from './version';
 import * as fs from 'fs';
@@ -150,7 +151,7 @@ async function main() {
   // Write custom instructions to .github/copilot-instructions.md
   // Copilot CLI reads this automatically — no need to prepend system prompt to messages
   try {
-    writeCopilotInstructions();
+    writeCopilotInstructions(config);
     console.log(`\n📝 Copilot instructions written to ${getConfigDir()}/AGENTS.md`);
   } catch (err) {
     console.warn(`⚠️ Could not write copilot instructions: ${err}`);
@@ -475,13 +476,6 @@ async function processMessage(
 
   if (!text || user.isBot) return;
 
-  // Dedup: skip if we already processed this exact message (handoff + poll race)
-  const dedupKey = getMessageKey(chatId, threadId, user.id, text);
-  if (!markProcessed(dedupKey)) {
-    console.log(`⏭️ Skipping duplicate message in ${chatId}:${threadId}`);
-    return;
-  }
-
   // Security check FIRST - before any logging
   // Each channel type runs its own security checks.
   if (channelType === 'telegram') {
@@ -493,6 +487,14 @@ async function processMessage(
     }
     const sanitized = securityResult.sanitizedText ?? text;
     if (!sanitized.trim()) return;
+
+    // Dedup AFTER sanitization so handoff (which dedup with sanitized text) matches
+    const dedupKey = getMessageKey(chatId, threadId, user.id, sanitized);
+    if (!markProcessed(dedupKey)) {
+      console.log(`⏭️ Skipping duplicate message in ${chatId}:${threadId}`);
+      return;
+    }
+
     return processMessageInner(channel, message, sanitized, security, config, chatId, threadId, isForum);
   }
 
@@ -763,8 +765,10 @@ async function processMessageInner(
     const fullPrompt = prompt;
 
     // Execute with Copilot CLI, resuming the session if we have one
+    const parsedTargetThread = parseInt(targetThreadId, 10);
+    const modelThreadId = Number.isFinite(parsedTargetThread) ? parsedTargetThread : threadIdNum;
     const sessionOptions: SessionOptions = {
-      model: config.copilot.defaultModel,
+      model: getSessionModel(chatIdNum, modelThreadId) || config.copilot.defaultModel,
       profile: config.copilot.defaultProfile,
       yoloMode: config.copilot.yoloMode,
       sessionId,  // May be undefined for fresh sessions
@@ -853,7 +857,7 @@ async function processMessageInner(
  * Uses the config dir so we don't clobber the user's global copilot-instructions.md.
  * The COPILOT_CUSTOM_INSTRUCTIONS_DIRS env var points Copilot CLI to our dir.
  */
-function writeCopilotInstructions(): void {
+function writeCopilotInstructions(config: Config): void {
   // Load instructions from file (contains action block format + available actions)
   let instructions: string;
   try {
@@ -885,10 +889,29 @@ Your role: Understand what the user needs, pick the best approach, and execute e
 
   const content = instructions + extras + '\n';
 
+  // Inject machine context if multiple machines are available
+  let machineSection = '';
+  try {
+    if (config.github?.enabled && config.github.repoPath) {
+      const machines = listAllMachines(config.github.repoPath);
+      if (machines.length > 1) {
+        machineSection += '\n\n## Available Machines\n\n';
+        machineSection += `Current machine: ${config.machine.name} (${config.machine.id.slice(0, 8)})\n`;
+        machineSection += machines.map(m =>
+          `- ${m.machineName} (${m.machineId.slice(0, 8)})${m.isLeader ? ' 👑' : ''}${m.isAlive ? ' ✅' : ' 💤'} — ${m.sessionCount} sessions`
+        ).join('\n');
+      }
+    }
+  } catch {
+    // Sync repo not available — skip machine section
+  }
+
+  const finalContent = content + machineSection + '\n';
+
   // Write to ghclaw config dir as AGENTS.md
   // Copilot CLI loads AGENTS.md from dirs listed in COPILOT_CUSTOM_INSTRUCTIONS_DIRS
   const instructionsDir = getConfigDir();
-  fs.writeFileSync(path.join(instructionsDir, 'AGENTS.md'), content, 'utf-8');
+  fs.writeFileSync(path.join(instructionsDir, 'AGENTS.md'), finalContent, 'utf-8');
 }
 
 function sleep(ms: number): Promise<void> {

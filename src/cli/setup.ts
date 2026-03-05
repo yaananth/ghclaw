@@ -380,6 +380,38 @@ export async function runSetup(): Promise<void> {
     default: false,
   }]);
 
+  // Model selection
+  console.log('\n─────────────────────────────────────────────────────────────');
+  console.log('AI Model\n');
+  console.log('  Which model should Copilot CLI use by default?\n');
+
+  const { modelChoice } = await inquirer.prompt([{
+    type: 'list',
+    name: 'modelChoice',
+    message: 'Default model:',
+    choices: [
+      { name: 'claude-sonnet-4.5 (recommended)', value: 'claude-sonnet-4.5' },
+      { name: 'claude-opus-4.5', value: 'claude-opus-4.5' },
+      { name: 'gpt-4o', value: 'gpt-4o' },
+      { name: 'o3-mini', value: 'o3-mini' },
+      { name: 'Custom (enter model ID)', value: '__custom__' },
+    ],
+    default: 'claude-sonnet-4.5',
+  }]);
+
+  let defaultModel = modelChoice;
+  if (modelChoice === '__custom__') {
+    const { customModel } = await inquirer.prompt([{
+      type: 'input',
+      name: 'customModel',
+      message: 'Enter model ID:',
+      validate: (input: string) => input.trim().length > 0 || 'Model ID is required',
+    }]);
+    defaultModel = customModel.trim();
+  }
+
+  console.log(`✅ Model: ${defaultModel}\n`);
+
   // Step 5: GitHub Integration (auto-configured)
   // Check if already configured
   let githubConfig = {
@@ -686,7 +718,7 @@ export async function runSetup(): Promise<void> {
       pollIntervalMs: 1000,
       pollTimeoutSeconds: 30,
     },
-    copilot: { yoloMode },
+    copilot: { yoloMode, defaultModel },
     memory: { dbPath: path.join(configDir, 'data', 'memory.sqlite') },
     github: githubConfig,
     channels: {
@@ -707,6 +739,7 @@ export async function runSetup(): Promise<void> {
   Bot:     @${botUsername}
   Group:   ${groupId}
   Users:   ${userIds || 'Any'}
+  Model:   ${defaultModel}
   YOLO:    ${yoloMode ? 'Enabled 🔥' : 'Disabled'}
   Machine: ${config.machine.name} (${config.machine.id.slice(0, 8)})
   GitHub:  ${githubConfig.enabled ? `✅ ${githubConfig.username}/${githubConfig.repoName}` : 'Disabled'}

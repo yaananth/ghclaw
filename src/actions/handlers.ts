@@ -18,6 +18,8 @@ import type {
   ListSessionsAction,
   SearchSessionsAction,
   ResumeSessionAction,
+  SetModelAction,
+  RouteToMachineAction,
 } from './types';
 import { getConfigAsync, type Config } from '../config';
 import { parseScheduleRequest } from '../schedules/parser';
@@ -41,8 +43,11 @@ import {
 } from '../copilot/chronicle';
 import {
   getSessionStats as getTelegramSessionStats,
+  getSessionModel,
+  setSessionModelByChatThread,
+  getOrCreateSession,
 } from '../memory/session-mapper';
-import { getSyncState } from '../github/sync';
+import { getSyncState, listAllMachines, writeHandoffRequest } from '../github/sync';
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -84,6 +89,14 @@ export async function executeAction(
       return handleShowStatus();
     case 'show_github_status':
       return handleShowGithubStatus();
+    case 'set_model':
+      return handleSetModel(action, context);
+    case 'show_model':
+      return handleShowModel(context);
+    case 'list_machines':
+      return handleListMachines();
+    case 'route_to_machine':
+      return handleRouteToMachine(action, context);
     default:
       return { response: '' };
   }
@@ -489,6 +502,164 @@ async function handleShowGithubStatus(): Promise<ActionResult> {
   response += `📅 Schedules: ${schedules.length}\n`;
 
   return { response, parseMode: 'Markdown' };
+}
+
+// ============================================================================
+// Model Handlers
+// ============================================================================
+
+const MODEL_ALIASES: Record<string, string> = {
+  'sonnet': 'claude-sonnet-4.5',
+  'opus': 'claude-opus-4.5',
+  'haiku': 'claude-haiku',
+  'gpt4o': 'gpt-4o',
+  'gpt-4o': 'gpt-4o',
+  'gpt4': 'gpt-4o',
+  'o1': 'o1',
+  'o3': 'o3-mini',
+};
+
+function resolveModelAlias(model: string): string {
+  const lower = model.toLowerCase().trim();
+  return MODEL_ALIASES[lower] || lower;
+}
+
+async function handleSetModel(
+  action: SetModelAction,
+  context: { chatId: number; threadId: number }
+): Promise<ActionResult> {
+  if (!action.model || typeof action.model !== 'string') {
+    return { response: '❌ No model specified.' };
+  }
+  const resolved = resolveModelAlias(action.model);
+  if (!resolved) {
+    return { response: '❌ Invalid model name.' };
+  }
+
+  // Ensure session exists before setting model
+  getOrCreateSession(context.chatId, context.threadId);
+  setSessionModelByChatThread(context.chatId, context.threadId, resolved);
+
+  return {
+    response: `🧠 Model switched to \`${resolved}\` for this session.\n\n_All messages in this thread will now use ${resolved}._`,
+    parseMode: 'Markdown',
+  };
+}
+
+async function handleShowModel(
+  context: { chatId: number; threadId: number }
+): Promise<ActionResult> {
+  const config = await getConfigAsync();
+  const sessionModel = getSessionModel(context.chatId, context.threadId);
+
+  if (sessionModel) {
+    return {
+      response: `🧠 *Current model:* \`${sessionModel}\` (session override)\n\n_Global default: ${config.copilot.defaultModel || 'default'}_`,
+      parseMode: 'Markdown',
+    };
+  }
+
+  return {
+    response: `🧠 *Current model:* \`${config.copilot.defaultModel || 'default'}\` (global default)\n\n_No per-session override set._`,
+    parseMode: 'Markdown',
+  };
+}
+
+// ============================================================================
+// Machine Handlers
+// ============================================================================
+
+async function handleListMachines(): Promise<ActionResult> {
+  const config = await getConfigAsync();
+  if (!config.github.enabled) {
+    return { response: '❌ GitHub integration not enabled. Run: ghclaw setup' };
+  }
+
+  const machines = listAllMachines(config.github.repoPath);
+  if (machines.length === 0) {
+    return {
+      response: `💻 *Machines*\n\nOnly this machine: *${config.machine.name}* (\`${config.machine.id.slice(0, 8)}\`)`,
+      parseMode: 'Markdown',
+    };
+  }
+
+  let response = `💻 *Available Machines (${machines.length})*\n\n`;
+  for (const m of machines) {
+    const isCurrent = m.machineId === config.machine.id;
+    const leader = m.isLeader ? ' 👑' : '';
+    const alive = m.isAlive ? ' ✅' : ' 💤';
+    const current = isCurrent ? ' ← you' : '';
+    response += `• *${m.machineName}* (\`${m.machineId.slice(0, 8)}\`)${leader}${alive}${current}\n  Sessions: ${m.sessionCount}\n`;
+  }
+
+  response += `\n_👑 = leader, ✅ = alive, 💤 = offline_`;
+
+  return { response, parseMode: 'Markdown' };
+}
+
+async function handleRouteToMachine(
+  action: RouteToMachineAction,
+  context: { chatId: number; threadId: number }
+): Promise<ActionResult> {
+  const config = await getConfigAsync();
+  if (!config.github.enabled) {
+    return { response: '❌ GitHub integration not enabled. Run: ghclaw setup' };
+  }
+
+  const machines = listAllMachines(config.github.repoPath);
+
+  if (!action.machine_name || typeof action.machine_name !== 'string') {
+    return { response: '❌ No machine name provided.' };
+  }
+  const targetName = action.machine_name.toLowerCase().trim();
+  if (!targetName) {
+    return { response: '❌ No machine name provided.' };
+  }
+
+  // Fuzzy match: case-insensitive partial match on machine name or ID prefix
+  const target = machines.find(m =>
+    m.machineName.toLowerCase().includes(targetName) ||
+    m.machineId.toLowerCase().startsWith(targetName)
+  );
+
+  if (!target) {
+    const available = machines.map(m => m.machineName).join(', ') || 'none';
+    return {
+      response: `❌ Machine "${action.machine_name}" not found.\n\nAvailable: ${available}`,
+    };
+  }
+
+  if (target.machineId === config.machine.id) {
+    return {
+      response: `ℹ️ Already on *${config.machine.name}*. No routing needed.`,
+      parseMode: 'Markdown',
+    };
+  }
+
+  if (!target.isAlive) {
+    return {
+      response: `⚠️ *${target.machineName}* appears to be offline (last seen: ${target.updatedAt || 'unknown'}).\n\nIt won't be able to pick up the handoff.`,
+      parseMode: 'Markdown',
+    };
+  }
+
+  // Write handoff request — target machine will claim leadership itself via sync loop
+  writeHandoffRequest(
+    config.github.repoPath,
+    config.machine.id, config.machine.name,
+    target.machineId, target.machineName,
+    `User requested routing to ${target.machineName}`,
+    {
+      chat_id: context.chatId.toString(),
+      thread_id: context.threadId.toString(),
+      text: '',
+    }
+  );
+
+  return {
+    response: `🔄 Routing to *${target.machineName}*...\n\n_Handoff request written. ${target.machineName} will pick it up on its next sync cycle._`,
+    parseMode: 'Markdown',
+  };
 }
 
 // ============================================================================

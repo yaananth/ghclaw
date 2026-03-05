@@ -37,6 +37,7 @@ export interface ChannelSession {
   machine_id?: string;             // Machine that owns this session
   machine_name?: string;           // Human-readable machine name
   channel_type?: string;           // 'telegram' | 'discord' | 'slack' | ...
+  model?: string;                  // Per-session model override (e.g. "claude-opus-4.5")
 }
 
 // ============================================================================
@@ -120,6 +121,13 @@ export function initDatabase(): Database {
   // Migration: add channel_type column if missing (defaults to 'telegram' for existing rows)
   try {
     db.exec("ALTER TABLE sessions ADD COLUMN channel_type TEXT DEFAULT 'telegram'");
+  } catch {
+    // Column already exists
+  }
+
+  // Migration: add model column if missing (per-session model override)
+  try {
+    db.exec('ALTER TABLE sessions ADD COLUMN model TEXT');
   } catch {
     // Column already exists
   }
@@ -391,6 +399,38 @@ export function createSessionWithTopic(
   }
 
   return db.prepare(`SELECT * FROM sessions WHERE id = ?`).get(sessionId) as TelegramSession;
+}
+
+// ============================================================================
+// Per-Session Model Override
+// ============================================================================
+
+/**
+ * Get the model override for a session (by chat/thread)
+ * Returns null if no override is set (use global default)
+ */
+export function getSessionModel(chatId: number, threadId: number): string | null {
+  const db = initDatabase();
+  const row = db.prepare(`
+    SELECT model FROM sessions WHERE chat_id = ? AND thread_id = ?
+  `).get(chatId, threadId) as { model: string | null } | undefined;
+  return row?.model ?? null;
+}
+
+/**
+ * Set the model override for a session by session ID
+ */
+export function setSessionModel(sessionId: string, model: string): void {
+  const db = initDatabase();
+  db.prepare('UPDATE sessions SET model = ? WHERE id = ?').run(model, sessionId);
+}
+
+/**
+ * Set the model override for a session by chat/thread (convenience)
+ */
+export function setSessionModelByChatThread(chatId: number, threadId: number, model: string): void {
+  const db = initDatabase();
+  db.prepare('UPDATE sessions SET model = ? WHERE chat_id = ? AND thread_id = ?').run(model, chatId, threadId);
 }
 
 // ============================================================================

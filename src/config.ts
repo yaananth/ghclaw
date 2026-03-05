@@ -188,7 +188,7 @@ export async function getConfigAsync(): Promise<Config> {
     },
     copilot: {
       cliPath: local.copilot?.cliPath ?? 'copilot',
-      defaultModel: local.copilot?.defaultModel,
+      defaultModel: local.copilot?.defaultModel ?? 'claude-sonnet-4.5',
       defaultProfile: local.copilot?.defaultProfile,
       yoloMode: local.copilot?.yoloMode ?? false,
     },
@@ -248,7 +248,7 @@ export function getConfig(): Config {
     },
     copilot: {
       cliPath: local.copilot?.cliPath ?? 'copilot',
-      defaultModel: local.copilot?.defaultModel,
+      defaultModel: local.copilot?.defaultModel ?? 'claude-sonnet-4.5',
       defaultProfile: local.copilot?.defaultProfile,
       yoloMode: local.copilot?.yoloMode ?? false,
     },

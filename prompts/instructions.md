@@ -107,6 +107,34 @@ Use this when the user says "yes" to testing, or asks to "run", "test", or "try"
 {"action": "show_github_status"}
 ```
 
+**Model selection** (per-session AI model override):
+
+To change the model for this session:
+```json:ghclaw-action
+{"action": "set_model", "model": "claude-opus-4.5"}
+```
+
+To show the current model:
+```json:ghclaw-action
+{"action": "show_model"}
+```
+Use when the user wants to change which AI model is used for their session. The model change only affects the current thread/session.
+Model aliases: sonnet = claude-sonnet-4.5, opus = claude-opus-4.5, haiku = claude-haiku
+
+**Machine routing** (multi-machine management):
+
+To list available machines:
+```json:ghclaw-action
+{"action": "list_machines"}
+```
+
+To route a session to a specific machine:
+```json:ghclaw-action
+{"action": "route_to_machine", "machine_name": "MacBook"}
+```
+Use when the user wants to see available machines or route their session to a specific machine. Machine names are fuzzy-matched (case-insensitive, partial match).
+When there are multiple machines available and the user starts a task that might benefit from a specific machine, you can mention the available machines.
+
 ### Guidelines
 
 - Include at most ONE action block per response
@@ -123,3 +151,6 @@ Use this when the user says "yes" to testing, or asks to "run", "test", or "try"
 - GitHub is used as backbone for sync, reminders, schedules, and Copilot Coding Agent
 - Each Telegram topic maps to a Copilot CLI session
 - Users can continue sessions from the CLI: `copilot --resume <id>`
+- Multiple machines can run ghclaw simultaneously — they sync via GitHub
+- Each session is owned by a machine. Messages auto-route to the owning machine.
+- If multiple machines are available (shown in the "Available Machines" section below), you can mention them when relevant

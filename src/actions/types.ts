@@ -21,7 +21,11 @@ export type ActionType =
   | 'resume_session'
   | 'new_session'
   | 'show_status'
-  | 'show_github_status';
+  | 'show_github_status'
+  | 'set_model'
+  | 'show_model'
+  | 'route_to_machine'
+  | 'list_machines';
 
 // Action payloads
 export interface CreateReminderAction {
@@ -100,6 +104,24 @@ export interface ShowGithubStatusAction {
   action: 'show_github_status';
 }
 
+export interface SetModelAction {
+  action: 'set_model';
+  model: string;  // e.g. "claude-sonnet-4.5", "claude-opus-4.5", "gpt-4o"
+}
+
+export interface ShowModelAction {
+  action: 'show_model';
+}
+
+export interface RouteToMachineAction {
+  action: 'route_to_machine';
+  machine_name: string;  // human-readable name or partial match
+}
+
+export interface ListMachinesAction {
+  action: 'list_machines';
+}
+
 // Union of all action types
 export type GhclawAction =
   | CreateReminderAction
@@ -116,7 +138,11 @@ export type GhclawAction =
   | ResumeSessionAction
   | NewSessionAction
   | ShowStatusAction
-  | ShowGithubStatusAction;
+  | ShowGithubStatusAction
+  | SetModelAction
+  | ShowModelAction
+  | RouteToMachineAction
+  | ListMachinesAction;
 
 // Result from executing an action
 export interface ActionResult {
