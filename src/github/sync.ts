@@ -216,7 +216,12 @@ export function exportMachineInfo(
       sessions: existing.sessions,
     });
     if (existingFingerprint === newFingerprint) {
-      return false; // No meaningful change
+      // Sessions unchanged — but still refresh updatedAt every 60s as a heartbeat
+      // so other machines know we're alive even when idle
+      const lastUpdate = existing.updatedAt ? new Date(existing.updatedAt).getTime() : 0;
+      if (Date.now() - lastUpdate < 60_000) {
+        return false; // No meaningful change and heartbeat still fresh
+      }
     }
   } catch {
     // File doesn't exist or corrupt — write it
