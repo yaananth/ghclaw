@@ -23,8 +23,6 @@ import {
   setSessionTopicId,
   getSessionsWithTopics,
   createSessionWithTopic,
-  getSessionMachine,
-  claimSession,
   getSessionModel,
   getSyncedSessionIds,
   addSyncedSessionId,
@@ -41,15 +39,13 @@ import {
 import { isChronicleAvailable, getChronicleStats, getRecentSessions as getChronicleRecentSessions, getSessionTurnCount, getMessagesAfterTurn, type ChronicleMessagePair } from './copilot/chronicle';
 import { parseActionBlocks, executeAction } from './actions';
 import { getGhToken } from './github/auth';
-import { startSyncLoop, writeLeaderClaim, writeHandoffRequest, readLeaderClaim, removeLeaderClaim, lookupSessionOwner, listAllMachines } from './github/sync';
-import { gitCommitAndPush } from './github/repo';
+import { startSyncLoop, writeLeaderClaim, removeLeaderClaim } from './github/sync';
 import { getVersion, getCommitHash } from './version';
 import * as fs from 'fs';
 import * as path from 'path';
 import { loadPrompt } from './prompts';
 
 let isRunning = false;
-let isLeader = true; // Start as leader (will yield on 409 or handoff)
 let discovery: CopilotDiscovery | null = null;
 
 /**
@@ -88,28 +84,8 @@ function escapeMarkdown(text: string): string {
 // Key: "chatId:threadId", Value: Copilot session ID or "__new__" for fresh session
 const sessionOverrides = new Map<string, string>();
 
-// Machine picker: pending machine selection for new sessions
-// Key: "chatId:threadId", Value: { originalPrompt, machines, timestamp }
-interface PendingMachinePick {
-  originalPrompt: string;
-  machines: Array<{ machineName: string; machineId: string; isCurrent: boolean }>;
-  timestamp: number;
-  userId: string;  // Who sent the original message
-  topicThreadId: string;  // The topic where the picker was sent
-}
-const pendingMachinePicks = new Map<string, PendingMachinePick>();
-const MACHINE_PICK_TIMEOUT_MS = 300_000; // 5 min to pick
-
-// Topics handed off to another machine — skip background title rename and
-// don't let sync repo ownership lookup override the handoff claim.
-// Key format: chatKey (chatId:threadId)
-const handoffClaimed = new Set<string>();
-
 // Dedup: track recently processed messages to prevent double-processing.
-// When a handoff fires, the pending message arrives via BOTH onHandoff callback
-// AND Telegram poll (offset wasn't acknowledged by the sender before yielding).
-// Uses content-based key (chatId:threadId:senderId:text) since handoff messages
-// have synthetic IDs that won't match Telegram message IDs.
+// Uses content-based key (chatId:threadId:senderId:text) for edge case protection.
 const recentlyProcessed = new Set<string>();
 const DEDUP_MAX_SIZE = 100;
 
@@ -210,22 +186,6 @@ async function main() {
     console.log('\n🧠 Sessions: Fresh start');
   }
 
-  // Pull sync repo before polling so we have fresh machine files for ownership checks.
-  // Without this, the first message could arrive before the sync loop's first pull,
-  // causing lookupSessionOwner to miss other machines' sessions.
-  if (config.github.enabled && config.github.syncEnabled) {
-    const repoPath = config.github.repoPath;
-    if (fs.existsSync(path.join(repoPath, '.git'))) {
-      try {
-        const { gitPull } = await import('./github/repo');
-        await gitPull(repoPath);
-        console.log('\n🔄 Sync repo pulled (fresh machine data)');
-      } catch (err) {
-        console.log(`\n⚠️ Sync repo pull failed: ${err}`);
-      }
-    }
-  }
-
   console.log('\n📡 Starting polling loop...');
   console.log('__DAEMON_READY__'); // Marker for `ghclaw start` to detect readiness
   isRunning = true;
@@ -271,14 +231,12 @@ async function main() {
     console.log('\n\n🛑 Shutting down gracefully...');
     isRunning = false;
 
-    // Remove leader claim so other machines can take over immediately
-    if (isLeader && config.github.enabled && config.github.syncEnabled) {
+    // Remove leader claim so the lock is released
+    if (config.github.enabled && config.github.syncEnabled) {
       try {
         const repoPath = config.github.repoPath;
-        if (removeLeaderClaim(repoPath)) {
-          await gitCommitAndPush(repoPath, `leader: ${config.machine.name} stepped down (shutdown)`);
-          console.log('👑 Leader claim removed');
-        }
+        removeLeaderClaim(repoPath);
+        console.log('👑 Leader claim removed');
       } catch (err) {
         console.warn(`⚠️ Could not remove leader claim: ${err}`);
       }
@@ -314,98 +272,9 @@ async function main() {
     }
   }
 
-  // Start GitHub sync loop in background (also handles leader coordination)
+  // Start GitHub sync loop in background
   if (config.github.enabled && config.github.syncEnabled) {
-    startSyncLoop(config, () => isRunning, () => isLeader,
-      // onHandoff: this machine should become leader
-      async (pendingMessage) => {
-        if (!isLeader) {
-          console.log('👑 Handoff received — becoming leader (resuming polling)');
-          isLeader = true;
-        }
-        // Process the pending message that triggered the handoff
-        // Run full security check using synthetic TelegramMessage (same as normal path)
-        if (pendingMessage) {
-          const senderId = pendingMessage.from_user_id;
-
-          // Reject if sender ID is missing (can't verify security)
-          if (!senderId) {
-            console.log('🚫 Handed-off message blocked: missing sender ID');
-            return;
-          }
-
-          // Build synthetic TelegramMessage for full security check
-          const syntheticMsg = {
-            message_id: 0,
-            date: Math.floor(Date.now() / 1000),
-            chat: {
-              id: parseInt(pendingMessage.chat_id),
-              type: 'supergroup' as const,
-            },
-            from: {
-              id: parseInt(senderId),
-              is_bot: false,
-              first_name: pendingMessage.from_user || 'Unknown',
-            },
-            text: pendingMessage.text,
-            message_thread_id: pendingMessage.thread_id !== '0' ? parseInt(pendingMessage.thread_id) : undefined,
-          };
-
-          const secResult = checkMessageSecurity(syntheticMsg, security);
-          if (!secResult.allowed) {
-            console.log(`🚫 Handed-off message blocked: ${secResult.reason}`);
-            return;
-          }
-
-          const sanitizedText = secResult.sanitizedText ?? pendingMessage.text;
-          console.log(`📨 Processing handed-off message in chat ${pendingMessage.chat_id} thread ${pendingMessage.thread_id}`);
-
-          // Mark as processed FIRST to prevent the follower probe from duplicating
-          const handoffDedupKey = getMessageKey(
-            pendingMessage.chat_id, pendingMessage.thread_id || '0',
-            senderId, sanitizedText
-          );
-          markProcessed(handoffDedupKey);
-
-          const msg: ChannelMessage = {
-            id: `handoff-${Date.now()}`,
-            chatId: pendingMessage.chat_id,
-            threadId: pendingMessage.thread_id,
-            text: sanitizedText,
-            sender: {
-              id: senderId,
-              displayName: pendingMessage.from_user || 'Unknown',
-              isBot: false,
-            },
-            timestamp: new Date(),
-            isThreaded: !!pendingMessage.thread_id && pendingMessage.thread_id !== '0',
-          };
-          const chatInfo = channel.getChatInfo ? await channel.getChatInfo(msg.chatId).catch(() => null) : null;
-          // Claim session locally so it's ours, and skip ownership check —
-          // this message was explicitly routed to us via handoff
-          const hChatId = parseInt(pendingMessage.chat_id) || 0;
-          const hThreadId = parseInt(pendingMessage.thread_id) || 0;
-          const hSession = getOrCreateSession(hChatId, hThreadId, undefined, config.machine.id, config.machine.name);
-          claimSession(hSession.id, config.machine.id, config.machine.name);
-          // Mark as handoff-claimed so ownership lookup doesn't override back
-          handoffClaimed.add(getChatKey(pendingMessage.chat_id, pendingMessage.thread_id || '0'));
-          processMessageInner(
-            channel, msg, sanitizedText, security, config,
-            msg.chatId, msg.threadId || '0', chatInfo?.isForum ?? false,
-            true // skipOwnershipCheck — handoff was explicitly directed to us
-          ).catch(err => {
-            console.error(`❌ Failed to process handed-off message: ${err}`);
-          });
-        }
-      },
-      // onYield: another machine claimed leadership
-      () => {
-        if (isLeader) {
-          console.log('📤 Another machine claimed leadership — yielding (sync-only mode)');
-          isLeader = false;
-        }
-      },
-    ).catch(err => {
+    startSyncLoop(config, () => isRunning).catch(err => {
       console.log(`⚠️ GitHub sync stopped: ${err}`);
     });
   }
@@ -421,43 +290,8 @@ async function main() {
     console.log('📋 Bot commands registered (natural language handles the rest)');
   }
 
-  // Main polling loop
-  // - On start: isLeader=true, start polling
-  // - 409: become follower
-  // - Follower: checks leader.json staleness (NO Telegram API calls — probing causes 409)
-  // - Handoff: handled by onHandoff callback in sync loop (sets isLeader directly)
-  const STALE_LEADER_MS = 120_000; // Consider leader dead after 2min without heartbeat
-
+  // Main polling loop — single instance only
   while (isRunning) {
-    if (!isLeader) {
-      // Follower mode: check leader.json staleness every 10s.
-      // NO Telegram poll — calling getUpdates as a follower triggers 409 for the real leader.
-      // The sync loop pulls leader.json (refreshed by leader's heartbeat every 30s).
-      // If stale >2min, the leader is dead — claim leadership.
-      // Handoffs are handled directly by onHandoff callback (sets isLeader=true).
-      await sleep(10_000);
-
-      if (config.github.enabled && config.github.syncEnabled) {
-        const leader = readLeaderClaim(config.github.repoPath);
-        if (leader) {
-          const claimedAt = new Date(leader.claimed_at).getTime();
-          if (Date.now() - claimedAt > STALE_LEADER_MS) {
-            console.log(`👑 Leader ${leader.machine_name} stale (${Math.floor((Date.now() - claimedAt) / 1000)}s) — taking over`);
-            writeLeaderClaim(config.github.repoPath, config.machine.id, config.machine.name);
-            isLeader = true;
-          }
-        } else {
-          // No leader.json at all — claim
-          console.log('👑 No leader.json — claiming leadership');
-          writeLeaderClaim(config.github.repoPath, config.machine.id, config.machine.name);
-          isLeader = true;
-        }
-      }
-      // No sync repo and not leader — nothing to do, just wait
-      // (single-machine mode: shouldn't get here unless transient 409)
-      continue;
-    }
-
     try {
       const messages = await channel.poll(config.telegram.pollTimeoutSeconds);
 
@@ -467,9 +301,9 @@ async function main() {
     } catch (error) {
       const errMsg = String(error);
       if (errMsg.includes('Conflict') || errMsg.includes('409') || errMsg.includes('terminated by other')) {
-        // Another instance is polling — yield (don't touch leader.json, it's theirs)
-        console.log('⚠️  Another instance is polling. Yielding to follower mode...');
-        isLeader = false;
+        console.error('❌ Another ghclaw instance is already polling. Only one instance can run at a time.');
+        console.error('   Stop the other instance first, or check ~/.ghclaw/daemon.lock');
+        process.exit(1);
       } else {
         console.error('❌ Polling error:', error);
         await sleep(config.telegram.pollIntervalMs * 5);
@@ -507,7 +341,7 @@ async function processMessage(
     const sanitized = securityResult.sanitizedText ?? text;
     if (!sanitized.trim()) return;
 
-    // Dedup AFTER sanitization so handoff (which dedup with sanitized text) matches
+    // Dedup AFTER sanitization so content-based dedup works correctly
     const dedupKey = getMessageKey(chatId, threadId, user.id, sanitized);
     if (!markProcessed(dedupKey)) {
       console.log(`⏭️ Skipping duplicate message in ${chatId}:${threadId}`);
@@ -533,7 +367,6 @@ async function processMessageInner(
   chatId: string,
   threadId: string,
   isForum: boolean,
-  skipOwnershipCheck: boolean = false
 ): Promise<void> {
   const user = message.sender;
   const chatIdNum = parseInt(chatId) || 0;
@@ -619,79 +452,6 @@ async function processMessageInner(
     return;
   }
 
-  // Check if it's a machine pick response (number reply to machine picker)
-  // Also check if user replied from General (threadId '0') — Telegram's "All Messages" view
-  // sends replies to General instead of the topic, so look up by userId too.
-  let machinePickKey = getChatKey(chatId, threadId);
-  let pendingPick = pendingMachinePicks.get(machinePickKey);
-  if (!pendingPick && threadId === '0') {
-    for (const [key, pick] of pendingMachinePicks.entries()) {
-      if (pick.userId === user.id && key.startsWith(chatId + ':')) {
-        machinePickKey = key;
-        pendingPick = pick;
-        threadId = pick.topicThreadId; // redirect to the correct topic
-        break;
-      }
-    }
-  }
-  if (pendingPick) {
-    pendingMachinePicks.delete(machinePickKey);
-
-    const trimmed = prompt.trim();
-    const pickNum = parseInt(trimmed, 10);
-
-    if (pickNum >= 1 && pickNum <= pendingPick.machines.length) {
-      const picked = pendingPick.machines[pickNum - 1];
-
-      if (picked.isCurrent) {
-        // User picked current machine — process normally with original prompt
-        console.log(`💻 User picked current machine: ${picked.machineName}`);
-        prompt = pendingPick.originalPrompt;
-        // Fall through to normal processing
-      } else {
-        // User picked a different machine — handoff
-        console.log(`🔄 User picked ${picked.machineName} — handing off`);
-
-        if (config.github?.enabled && config.github.repoPath) {
-          writeHandoffRequest(
-            config.github.repoPath,
-            config.machine.id, config.machine.name,
-            picked.machineId, picked.machineName,
-            `User selected ${picked.machineName} for: ${pendingPick.originalPrompt.slice(0, 100)}`,
-            { chat_id: chatId, thread_id: threadId, text: pendingPick.originalPrompt, from_user: message.sender?.displayName, from_user_id: message.sender?.id }
-          );
-          writeLeaderClaim(config.github.repoPath, picked.machineId, picked.machineName);
-
-          // Push immediately so target machine sees the handoff on its next sync cycle
-          // (don't wait for our own sync loop which could be up to 5s away)
-          gitCommitAndPush(config.github.repoPath, `handoff: ${config.machine.name} → ${picked.machineName}`).catch(err => {
-            console.log(`⚠️ Handoff push failed (sync loop will retry): ${err}`);
-          });
-        }
-
-        // Rename the topic to show the target machine instead of the originating one
-        if (channel.renameThread && threadId !== '0') {
-          const shortPrompt = pendingPick.originalPrompt.slice(0, 30).trim().replace(/[\n\r\t]+/g, ' ') || 'New chat';
-          channel.renameThread(chatId, threadId, `🤖 [${picked.machineName}] ${shortPrompt}`).catch(err => {
-            console.log(`⚠️ Could not rename topic for handoff: ${err}`);
-          });
-        }
-
-        // Mark as handoff-claimed so background title rename is suppressed
-        handoffClaimed.add(getChatKey(chatId, threadId));
-
-        await channel.send(chatId, `🔄 Routing to *${picked.machineName}*... it will pick this up shortly.`, {
-          threadId: threadId !== '0' ? threadId : undefined,
-          format: 'markdown',
-        });
-        return;
-      }
-    } else {
-      // Not a number — treat as "don't care", process on current machine with this new message as the prompt
-      console.log(`💻 Non-numeric reply to machine picker — processing on current machine`);
-    }
-  }
-
   // Get topic name if available (Telegram-specific, from raw message)
   let topicName: string | undefined;
   if (isForum && message.raw) {
@@ -722,90 +482,10 @@ async function processMessageInner(
     const session = getOrCreateSession(chatIdNum, threadIdNum, topicName, config.machine.id, config.machine.name);
     sessionId = session.id;
     sessionName = session.name;
-
-    // Cross-machine ownership check: local SQLite only knows about THIS machine's sessions.
-    // When a topic was created by another machine (e.g., Codespace), our local DB won't have it,
-    // so getOrCreateSession creates a new row with OUR machine_id. Check the shared sync repo
-    // (sessions.json) for the real owner before deciding whether to handoff.
-    // SKIP for handoff-received messages and handoff-claimed sessions.
-    let effectiveMachineId = session.machine_id;
-    let effectiveMachineName = session.machine_name;
-    const sessionChatKey = getChatKey(chatId, threadId);
-    if (!skipOwnershipCheck && !handoffClaimed.has(sessionChatKey) && config.github.enabled && config.github.syncEnabled) {
-      if (!effectiveMachineId || effectiveMachineId === config.machine.id) {
-        const repoOwner = lookupSessionOwner(config.github.repoPath, chatIdNum, threadIdNum, config.machine.id);
-        if (repoOwner && repoOwner.machine_id !== config.machine.id) {
-          effectiveMachineId = repoOwner.machine_id;
-          effectiveMachineName = repoOwner.machine_name;
-          // Correct local SQLite so future lookups are right and machine file exports are accurate
-          claimSession(session.id, repoOwner.machine_id, repoOwner.machine_name);
-          console.log(`🔍 [${sessionName}] Sync repo says owner is ${effectiveMachineName} (${effectiveMachineId.slice(0, 8)}) — corrected local DB`);
-        }
-      }
-    }
-
-    // Soft-route: if session belongs to a different machine, trigger handoff
-    if (effectiveMachineId && effectiveMachineId !== config.machine.id) {
-      const targetName = effectiveMachineName || 'another machine';
-      const targetId = effectiveMachineId;
-
-      // Check if the target machine is actually alive before handing off.
-      // Use listAllMachines which checks both leader.json AND machine file heartbeats.
-      // If the target is dead/stopped, just claim the session locally instead of routing to a ghost.
-      let targetAlive = false;
-      if (config.github.enabled && config.github.syncEnabled) {
-        const machines = listAllMachines(config.github.repoPath);
-        const targetMachine = machines.find(m => m.machineId === targetId);
-        targetAlive = targetMachine?.isAlive ?? false;
-      }
-
-      if (targetAlive && config.github.enabled && config.github.syncEnabled) {
-        // Target is alive — trigger a leader handoff
-        console.log(`🔀 [${sessionName}] Handing off to ${targetName} (${targetId.slice(0, 8)})`);
-        writeHandoffRequest(
-          config.github.repoPath,
-          config.machine.id, config.machine.name,
-          targetId, targetName,
-          `Message in session "${sessionName}" owned by ${targetName}`,
-          { chat_id: chatId, thread_id: threadId, text: message.text, from_user: message.sender?.displayName, from_user_id: message.sender?.id }
-        );
-        // Also update leader.json to point to the target machine
-        writeLeaderClaim(config.github.repoPath, targetId, targetName);
-
-        // Push immediately so target machine sees the handoff on its next sync cycle
-        // (withGitLock prevents races with the sync loop)
-        gitCommitAndPush(config.github.repoPath, `handoff: ${config.machine.name} → ${targetName}`).catch(err => {
-          console.log(`⚠️ Handoff push failed (sync loop will retry): ${err}`);
-        });
-
-        isLeader = false;
-        await channel.send(chatId, `🔄 Routing to *${targetName}*... it will pick this up shortly.`, {
-          threadId: threadId !== '0' ? threadId : undefined,
-          format: 'markdown',
-        });
-        return;
-      }
-
-      // Target is not alive or no sync repo — claim and process locally
-      console.log(`🔀 [${sessionName}] ${targetAlive ? 'No sync repo' : `Target ${targetName} not alive`} — claiming locally`);
-      claimSession(session.id, config.machine.id, config.machine.name);
-    }
   }
 
   // Auto-create topic for forum groups if message is in main chat (General)
-  // But first: if user has a pending machine pick in another topic, redirect there
   let targetThreadId = threadId;
-  if (isForum && threadId === '0') {
-    for (const [key, pick] of pendingMachinePicks.entries()) {
-      if (pick.userId === user.id && key.startsWith(chatId + ':')) {
-        // This user has a pending pick — redirect to that topic
-        console.log(`🔀 Redirecting General reply to pending machine pick in topic ${pick.topicThreadId}`);
-        threadId = pick.topicThreadId;
-        targetThreadId = pick.topicThreadId;
-        break;
-      }
-    }
-  }
   if (isForum && threadId === '0' && !override && channel.createThread) {
     try {
       // Create topic with placeholder name (instant, don't block on AI)
@@ -834,17 +514,9 @@ async function processMessageInner(
 
       // Generate AI title in background and rename
       const topicThreadId = targetThreadId;
-      const topicChatKey = getChatKey(chatId, topicThreadId);
       const sessionIdForRename = session.id;
       generateTopicTitle(prompt, config.copilot.cliPath).then(async (title) => {
         try {
-          // Skip rename if this topic was handed off to another machine
-          // (the handoff already renamed it with the target machine's tag)
-          if (handoffClaimed.has(topicChatKey)) {
-            console.log(`📝 Topic ${topicThreadId} skipping rename (handed off)`);
-            renameSession(sessionIdForRename, title);
-            return;
-          }
           if (channel.renameThread) {
             await channel.renameThread(chatId, topicThreadId, `🤖 [${machineTag}] ${title}`);
           }
@@ -865,44 +537,6 @@ async function processMessageInner(
     }
   }
 
-  // Machine picker: if new topic AND multiple alive machines, ask user to choose
-  if (createdTopic && config.github?.enabled && config.github.repoPath) {
-    try {
-      const machines = listAllMachines(config.github.repoPath);
-      const aliveMachines = machines.filter(m => m.isAlive);
-      if (aliveMachines.length > 1) {
-        const machineChoices = aliveMachines.map(m => ({
-          machineName: m.machineName,
-          machineId: m.machineId,
-          isCurrent: m.machineId === config.machine.id,
-        }));
-
-        const pickerKey = getChatKey(chatId, targetThreadId);
-        pendingMachinePicks.set(pickerKey, {
-          originalPrompt: prompt,
-          machines: machineChoices,
-          timestamp: Date.now(),
-          userId: user.id,
-          topicThreadId: targetThreadId,
-        });
-
-        let msg = `💻 *Multiple machines available:*\n\n`;
-        machineChoices.forEach((m, i) => {
-          msg += `${i + 1}. *${m.machineName}*${m.isCurrent ? ' ← current' : ''}\n`;
-        });
-        msg += `\n_Reply with a number to pick, or just send your message to use current._`;
-
-        await channel.send(chatId, msg, {
-          threadId: targetThreadId !== '0' ? targetThreadId : undefined,
-          format: 'markdown',
-        });
-
-        console.log(`💻 Machine picker sent for ${pickerKey} (${aliveMachines.length} alive)`);
-        return; // Wait for user's reply
-      }
-    } catch { /* no machine picker if sync unavailable */ }
-  }
-
   // Log AFTER security check - redact potential secrets
   const redactedPrompt = prompt
     .replace(/[a-zA-Z0-9_-]{20,}/g, '[REDACTED]')  // Long tokens
@@ -916,14 +550,13 @@ async function processMessageInner(
     // the LLM often ignores them in favor of native tools. This prefix ensures
     // the LLM outputs structured action blocks that daemon.ts can parse & execute.
     const actionReminder = [
-      'IMPORTANT: You are ghclaw. When the user asks about machines, models, reminders, schedules, sessions, status, or coding tasks,',
+      'IMPORTANT: You are ghclaw. When the user asks about models, reminders, schedules, sessions, status, or coding tasks,',
       'you MUST respond with a ```json:ghclaw-action``` fenced code block at the end of your message.',
       'Do NOT use your own tools (bash, sql, grep, etc.) to answer these — the action block handler does it.',
-      'Key actions: "list machines" → {"action":"list_machines"}, "show status" → {"action":"show_status"},',
+      'Key actions: "show status" → {"action":"show_status"},',
       '"remind me X" → {"action":"create_reminder","message":"X","schedule":"..."},',
       '"list sessions" → {"action":"list_sessions"},',
-      '"use/switch to opus" → {"action":"set_model","model":"claude-opus-4.5"},',
-      '"route to X" → {"action":"route_to_machine","machine_name":"X"}.',
+      '"use/switch to opus" → {"action":"set_model","model":"claude-opus-4.5"}.',
       'See AGENTS.md for all available actions. Always emit the action block — never answer these yourself.',
     ].join(' ');
 
@@ -1054,24 +687,7 @@ Your role: Understand what the user needs, pick the best approach, and execute e
 
   const content = instructions + extras + '\n';
 
-  // Inject machine context if multiple machines are available
-  let machineSection = '';
-  try {
-    if (config.github?.enabled && config.github.repoPath) {
-      const machines = listAllMachines(config.github.repoPath);
-      if (machines.length > 1) {
-        machineSection += '\n\n## Available Machines\n\n';
-        machineSection += `Current machine: ${config.machine.name} (${config.machine.id.slice(0, 8)})\n`;
-        machineSection += machines.map(m =>
-          `- ${m.machineName} (${m.machineId.slice(0, 8)})${m.isLeader ? ' 👑' : ''}${m.isAlive ? ' ✅' : ' 💤'} — ${m.sessionCount} sessions`
-        ).join('\n');
-      }
-    }
-  } catch {
-    // Sync repo not available — skip machine section
-  }
-
-  const finalContent = content + machineSection + '\n';
+  const finalContent = content + '\n';
 
   // Write to ghclaw config dir as AGENTS.md
   // Copilot CLI loads AGENTS.md from dirs listed in COPILOT_CUSTOM_INSTRUCTIONS_DIRS

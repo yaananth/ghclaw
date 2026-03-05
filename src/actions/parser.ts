@@ -48,8 +48,6 @@ const ACTION_SCHEMAS: Record<ActionType, { required: string[]; optional: string[
   show_github_status: { required: [], optional: [] },
   set_model: { required: ['model'], optional: [] },
   show_model: { required: [], optional: [] },
-  route_to_machine: { required: ['machine_name'], optional: [] },
-  list_machines: { required: [], optional: [] },
 };
 
 /** All valid action type strings */

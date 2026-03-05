@@ -23,9 +23,7 @@ export type ActionType =
   | 'show_status'
   | 'show_github_status'
   | 'set_model'
-  | 'show_model'
-  | 'route_to_machine'
-  | 'list_machines';
+  | 'show_model';
 
 // Action payloads
 export interface CreateReminderAction {
@@ -113,15 +111,6 @@ export interface ShowModelAction {
   action: 'show_model';
 }
 
-export interface RouteToMachineAction {
-  action: 'route_to_machine';
-  machine_name: string;  // human-readable name or partial match
-}
-
-export interface ListMachinesAction {
-  action: 'list_machines';
-}
-
 // Union of all action types
 export type GhclawAction =
   | CreateReminderAction
@@ -140,9 +129,7 @@ export type GhclawAction =
   | ShowStatusAction
   | ShowGithubStatusAction
   | SetModelAction
-  | ShowModelAction
-  | RouteToMachineAction
-  | ListMachinesAction;
+  | ShowModelAction;
 
 // Result from executing an action
 export interface ActionResult {
