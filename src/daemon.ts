@@ -642,6 +642,12 @@ async function processMessageInner(
             { chat_id: chatId, thread_id: threadId, text: pendingPick.originalPrompt, from_user: message.sender?.displayName, from_user_id: message.sender?.id }
           );
           writeLeaderClaim(config.github.repoPath, picked.machineId, picked.machineName);
+
+          // Push immediately so target machine sees the handoff on its next sync cycle
+          // (don't wait for our own sync loop which could be up to 5s away)
+          gitCommitAndPush(config.github.repoPath, `handoff: ${config.machine.name} → ${picked.machineName}`).catch(err => {
+            console.log(`⚠️ Handoff push failed (sync loop will retry): ${err}`);
+          });
         }
 
         await channel.send(chatId, `🔄 Routing to *${picked.machineName}*... it will pick this up shortly.`, {
@@ -737,9 +743,12 @@ async function processMessageInner(
         // Also update leader.json to point to the target machine
         writeLeaderClaim(config.github.repoPath, targetId, targetName);
 
-        // Don't push separately — the sync loop will commit handoff.json + leader.json
-        // within ~5s. Pushing here races with the sync loop on the same git working tree,
-        // causing the push to silently fail (sync loop already committed the changes).
+        // Push immediately so target machine sees the handoff on its next sync cycle
+        // (withGitLock prevents races with the sync loop)
+        gitCommitAndPush(config.github.repoPath, `handoff: ${config.machine.name} → ${targetName}`).catch(err => {
+          console.log(`⚠️ Handoff push failed (sync loop will retry): ${err}`);
+        });
+
         isLeader = false;
         await channel.send(chatId, `🔄 Routing to *${targetName}*... it will pick this up shortly.`, {
           threadId: threadId !== '0' ? threadId : undefined,
