@@ -100,6 +100,11 @@ interface PendingMachinePick {
 const pendingMachinePicks = new Map<string, PendingMachinePick>();
 const MACHINE_PICK_TIMEOUT_MS = 300_000; // 5 min to pick
 
+// Topics handed off to another machine — skip background title rename and
+// don't let sync repo ownership lookup override the handoff claim.
+// Key format: chatKey (chatId:threadId)
+const handoffClaimed = new Set<string>();
+
 // Dedup: track recently processed messages to prevent double-processing.
 // When a handoff fires, the pending message arrives via BOTH onHandoff callback
 // AND Telegram poll (offset wasn't acknowledged by the sender before yielding).
@@ -382,6 +387,8 @@ async function main() {
           const hThreadId = parseInt(pendingMessage.thread_id) || 0;
           const hSession = getOrCreateSession(hChatId, hThreadId, undefined, config.machine.id, config.machine.name);
           claimSession(hSession.id, config.machine.id, config.machine.name);
+          // Mark as handoff-claimed so ownership lookup doesn't override back
+          handoffClaimed.add(getChatKey(pendingMessage.chat_id, pendingMessage.thread_id || '0'));
           processMessageInner(
             channel, msg, sanitizedText, security, config,
             msg.chatId, msg.threadId || '0', chatInfo?.isForum ?? false,
@@ -670,6 +677,9 @@ async function processMessageInner(
           });
         }
 
+        // Mark as handoff-claimed so background title rename is suppressed
+        handoffClaimed.add(getChatKey(chatId, threadId));
+
         await channel.send(chatId, `🔄 Routing to *${picked.machineName}*... it will pick this up shortly.`, {
           threadId: threadId !== '0' ? threadId : undefined,
           format: 'markdown',
@@ -717,10 +727,11 @@ async function processMessageInner(
     // When a topic was created by another machine (e.g., Codespace), our local DB won't have it,
     // so getOrCreateSession creates a new row with OUR machine_id. Check the shared sync repo
     // (sessions.json) for the real owner before deciding whether to handoff.
-    // SKIP for handoff-received messages — they were explicitly routed to us.
+    // SKIP for handoff-received messages and handoff-claimed sessions.
     let effectiveMachineId = session.machine_id;
     let effectiveMachineName = session.machine_name;
-    if (!skipOwnershipCheck && config.github.enabled && config.github.syncEnabled) {
+    const sessionChatKey = getChatKey(chatId, threadId);
+    if (!skipOwnershipCheck && !handoffClaimed.has(sessionChatKey) && config.github.enabled && config.github.syncEnabled) {
       if (!effectiveMachineId || effectiveMachineId === config.machine.id) {
         const repoOwner = lookupSessionOwner(config.github.repoPath, chatIdNum, threadIdNum, config.machine.id);
         if (repoOwner && repoOwner.machine_id !== config.machine.id) {
@@ -823,9 +834,17 @@ async function processMessageInner(
 
       // Generate AI title in background and rename
       const topicThreadId = targetThreadId;
+      const topicChatKey = getChatKey(chatId, topicThreadId);
       const sessionIdForRename = session.id;
       generateTopicTitle(prompt, config.copilot.cliPath).then(async (title) => {
         try {
+          // Skip rename if this topic was handed off to another machine
+          // (the handoff already renamed it with the target machine's tag)
+          if (handoffClaimed.has(topicChatKey)) {
+            console.log(`📝 Topic ${topicThreadId} skipping rename (handed off)`);
+            renameSession(sessionIdForRename, title);
+            return;
+          }
           if (channel.renameThread) {
             await channel.renameThread(chatId, topicThreadId, `🤖 [${machineTag}] ${title}`);
           }
