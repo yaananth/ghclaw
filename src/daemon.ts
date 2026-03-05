@@ -613,8 +613,20 @@ async function processMessageInner(
   }
 
   // Check if it's a machine pick response (number reply to machine picker)
-  const machinePickKey = getChatKey(chatId, threadId);
-  const pendingPick = pendingMachinePicks.get(machinePickKey);
+  // Also check if user replied from General (threadId '0') — Telegram's "All Messages" view
+  // sends replies to General instead of the topic, so look up by userId too.
+  let machinePickKey = getChatKey(chatId, threadId);
+  let pendingPick = pendingMachinePicks.get(machinePickKey);
+  if (!pendingPick && threadId === '0') {
+    for (const [key, pick] of pendingMachinePicks.entries()) {
+      if (pick.userId === user.id && key.startsWith(chatId + ':')) {
+        machinePickKey = key;
+        pendingPick = pick;
+        threadId = pick.topicThreadId; // redirect to the correct topic
+        break;
+      }
+    }
+  }
   if (pendingPick) {
     pendingMachinePicks.delete(machinePickKey);
 
@@ -647,6 +659,14 @@ async function processMessageInner(
           // (don't wait for our own sync loop which could be up to 5s away)
           gitCommitAndPush(config.github.repoPath, `handoff: ${config.machine.name} → ${picked.machineName}`).catch(err => {
             console.log(`⚠️ Handoff push failed (sync loop will retry): ${err}`);
+          });
+        }
+
+        // Rename the topic to show the target machine instead of the originating one
+        if (channel.renameThread && threadId !== '0') {
+          const shortPrompt = pendingPick.originalPrompt.slice(0, 30).trim().replace(/[\n\r\t]+/g, ' ') || 'New chat';
+          channel.renameThread(chatId, threadId, `🤖 [${picked.machineName}] ${shortPrompt}`).catch(err => {
+            console.log(`⚠️ Could not rename topic for handoff: ${err}`);
           });
         }
 
@@ -719,15 +739,13 @@ async function processMessageInner(
       const targetId = effectiveMachineId;
 
       // Check if the target machine is actually alive before handing off.
-      // A machine is considered alive if it's the current leader with a recent claim (< 2 min).
+      // Use listAllMachines which checks both leader.json AND machine file heartbeats.
       // If the target is dead/stopped, just claim the session locally instead of routing to a ghost.
       let targetAlive = false;
       if (config.github.enabled && config.github.syncEnabled) {
-        const leader = readLeaderClaim(config.github.repoPath);
-        if (leader && leader.machine_id === targetId) {
-          const claimAge = Date.now() - new Date(leader.claimed_at).getTime();
-          targetAlive = claimAge < 120_000; // 2 minutes (leader refreshes every 30s)
-        }
+        const machines = listAllMachines(config.github.repoPath);
+        const targetMachine = machines.find(m => m.machineId === targetId);
+        targetAlive = targetMachine?.isAlive ?? false;
       }
 
       if (targetAlive && config.github.enabled && config.github.syncEnabled) {
