@@ -550,14 +550,10 @@ async function processMessageInner(
     // the LLM often ignores them in favor of native tools. This prefix ensures
     // the LLM outputs structured action blocks that daemon.ts can parse & execute.
     const actionReminder = [
-      'IMPORTANT: You are ghclaw. When the user asks about models, reminders, schedules, sessions, status, or coding tasks,',
-      'you MUST respond with a ```json:ghclaw-action``` fenced code block at the end of your message.',
-      'Do NOT use your own tools (bash, sql, grep, etc.) to answer these — the action block handler does it.',
-      'Key actions: "show status" → {"action":"show_status"},',
-      '"remind me X" → {"action":"create_reminder","message":"X","schedule":"..."},',
-      '"list sessions" → {"action":"list_sessions"},',
-      '"use/switch to opus" → {"action":"set_model","model":"claude-opus-4.5"}.',
-      'See AGENTS.md for all available actions. Always emit the action block — never answer these yourself.',
+      'IMPORTANT: You are ghclaw. When the user EXPLICITLY asks to create reminders, schedules, coding tasks,',
+      'list/resume sessions, switch models, or show system/github status, include a ```json:ghclaw-action``` block.',
+      'Do NOT emit action blocks for general conversation, questions, or tasks — only for the specific actions in AGENTS.md.',
+      'See AGENTS.md for the full list. For everything else, just respond naturally and use your tools.',
     ].join(' ');
 
     const fullPrompt = `[System: ${actionReminder}]\n\nUser message: ${prompt}`;
