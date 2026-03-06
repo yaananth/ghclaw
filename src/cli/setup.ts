@@ -367,16 +367,15 @@ export async function runSetup(): Promise<void> {
   // Step 4: Final settings
   console.log('\n─────────────────────────────────────────────────────────────');
 
-  console.log('Tool Access Mode\n');
-  console.log('  Default (No):  Copilot CLI uses safe defaults — read-only tools,');
-  console.log('                 prompts before file edits or shell commands');
-  console.log('  YOLO (Yes):    All tools auto-approved — file edits, shell, web search,');
-  console.log('                 no confirmation prompts (--allow-all-tools)\n');
+  console.log('Autopilot\n');
+  console.log('  Default (No):  Copilot responds once per prompt in normal prompt mode');
+  console.log('  Autopilot:     Copilot can continue in prompt mode without waiting');
+  console.log('                 for another user message (--autopilot)\n');
 
-  const { yoloMode } = await inquirer.prompt([{
+  const { autopilot } = await inquirer.prompt([{
     type: 'confirm',
-    name: 'yoloMode',
-    message: '🔥 Enable YOLO mode? (default: No)',
+    name: 'autopilot',
+    message: '🤖 Enable Autopilot by default? (default: No)',
     default: false,
   }]);
 
@@ -718,7 +717,7 @@ export async function runSetup(): Promise<void> {
       pollIntervalMs: 1000,
       pollTimeoutSeconds: 30,
     },
-    copilot: { yoloMode, defaultModel },
+    copilot: { autopilot, defaultModel },
     memory: { dbPath: path.join(configDir, 'data', 'memory.sqlite') },
     github: githubConfig,
     channels: {
@@ -740,7 +739,7 @@ export async function runSetup(): Promise<void> {
   Group:   ${groupId}
   Users:   ${userIds || 'Any'}
   Model:   ${defaultModel}
-  YOLO:    ${yoloMode ? 'Enabled 🔥' : 'Disabled'}
+  Autopilot: ${autopilot ? 'Enabled 🤖' : 'Disabled'}
   Machine: ${config.machine.name} (${config.machine.id.slice(0, 8)})
   GitHub:  ${githubConfig.enabled ? `✅ ${githubConfig.username}/${githubConfig.repoName}` : 'Disabled'}
 `);

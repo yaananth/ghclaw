@@ -354,7 +354,7 @@ The daemon handles SIGINT and SIGTERM for graceful shutdown:
 - [ ] Run `ghclaw doctor` — all checks should pass
 - [ ] GitHub repo is private (verify on GitHub)
 - [ ] Repo secrets are set (verify with `gh secret list --repo {user}/.ghclaw`)
-- [ ] YOLO mode is OFF unless explicitly needed (`copilot.yoloMode: false`)
+- [ ] Autopilot default matches your preference (`copilot.autopilot: false` unless you want continuation)
 - [ ] Bot token not committed to any repo (check with `git log --all -p | grep -c "bot token pattern"`)
 
 ## Security Comparison: ghclaw vs Alternatives

@@ -25,9 +25,7 @@ export interface Config {
     defaultModel?: string;
     defaultProfile?: string;
     defaultAgent?: string;
-    // YOLO mode: allow all tools (--allow-all-tools)
-    // Default: false (safer, uses default Copilot CLI behavior)
-    yoloMode: boolean;
+    autopilot: boolean;
   };
   memory: {
     dbPath: string;
@@ -70,6 +68,7 @@ interface LocalConfig {
     defaultModel?: string;
     defaultProfile?: string;
     defaultAgent?: string;
+    autopilot?: boolean;
     yoloMode?: boolean;
   };
   memory?: {
@@ -193,7 +192,7 @@ export async function getConfigAsync(): Promise<Config> {
       defaultModel: local.copilot?.defaultModel ?? 'claude-sonnet-4.5',
       defaultProfile: local.copilot?.defaultProfile,
       defaultAgent: local.copilot?.defaultAgent,
-      yoloMode: local.copilot?.yoloMode ?? false,
+      autopilot: local.copilot?.autopilot ?? local.copilot?.yoloMode ?? false,
     },
     memory: {
       dbPath: local.memory?.dbPath ?? path.join(CONFIG_DIR, 'data', 'memory.sqlite'),
@@ -254,7 +253,7 @@ export function getConfig(): Config {
       defaultModel: local.copilot?.defaultModel ?? 'claude-sonnet-4.5',
       defaultProfile: local.copilot?.defaultProfile,
       defaultAgent: local.copilot?.defaultAgent,
-      yoloMode: local.copilot?.yoloMode ?? false,
+      autopilot: local.copilot?.autopilot ?? local.copilot?.yoloMode ?? false,
     },
     memory: {
       dbPath: local.memory?.dbPath ?? path.join(CONFIG_DIR, 'data', 'memory.sqlite'),

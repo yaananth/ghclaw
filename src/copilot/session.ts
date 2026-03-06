@@ -18,7 +18,8 @@ export interface SessionOptions {
   agent?: string;
   workingDir?: string;
   timeout?: number;
-  yoloMode?: boolean;
+  allowAll?: boolean;
+  autopilot?: boolean;
   sessionId?: string;  // Copilot CLI session UUID for --resume
   cliPath?: string;    // Path to copilot CLI binary
 }
@@ -92,9 +93,12 @@ export async function* executePrompt(
     args.push('--agent', options.agent);
   }
 
-  // YOLO mode: allow all tools (user opted in)
-  if (options.yoloMode) {
-    args.push('--yolo');
+  if (options.allowAll) {
+    args.push('--allow-all');
+  }
+
+  if (options.autopilot) {
+    args.push('--autopilot');
   }
 
   // Silent mode for cleaner output in non-interactive use

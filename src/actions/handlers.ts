@@ -312,7 +312,7 @@ async function handleCreateAgenticSchedule(action: CreateAgenticScheduleAction):
 
     const copilotOptions: CopilotSessionOptions = {
       cliPath: config.copilot.cliPath,
-      yoloMode: true, // Needs file write + shell + web fetch access
+      allowAll: true, // Needs file write + shell + web fetch access
       workingDir: config.github.repoPath,
     };
 
@@ -363,7 +363,7 @@ async function handleTestAgenticWorkflow(action: TestAgenticWorkflowAction): Pro
 
     const copilotOptions: CopilotSessionOptions = {
       cliPath: config.copilot.cliPath,
-      yoloMode: true,
+      allowAll: true,
       workingDir: config.github.repoPath,
     };
 

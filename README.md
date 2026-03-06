@@ -98,7 +98,7 @@ You (Channel)                 ghclaw (local)                    GitHub
 ### Telegram
 - **Forum topics**: Auto-created per session, tagged with machine name
 - **Streaming**: Live message updates with typing cursor
-- **YOLO mode**: Optional full tool access (file editing, shell, web search)
+- **Autopilot**: Optional prompt-mode continuation without waiting for another user message
 
 ## CLI Commands
 
@@ -221,7 +221,7 @@ Local Machine                          GitHub
 | `-p "prompt"` | Non-interactive mode |
 | `--silent` | Clean stdout for streaming |
 | `--model <name>` | Model routing per task |
-| `--allow-all-tools` | YOLO mode |
+| `--autopilot` | Autopilot continuation in prompt mode |
 | `/fleet` | Parallel subagent execution |
 | `/plan` | Planning mode for complex tasks |
 | `/research` | Deep research with GitHub search and web |
@@ -260,7 +260,7 @@ Secrets in OS keychain. GitHub repo secrets for Actions workflows. All connectio
     "pollTimeoutSeconds": 30
   },
   "copilot": {
-    "yoloMode": false,
+    "autopilot": false,
     "defaultModel": "claude-sonnet-4.6"
   },
   "machine": {

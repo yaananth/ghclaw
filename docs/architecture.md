@@ -451,16 +451,11 @@ Six layers:
 5. **GitHub**: Private repo, repo-level secrets for Actions, `repo`+`workflow` scopes required
 6. **Process**: Restrictive file permissions, clean error handling, capped output reads
 
-## YOLO Mode
+## Autopilot
 
-When enabled (`copilot.yoloMode: true`), passes `--yolo` to Copilot CLI (equivalent to `--allow-all-tools --allow-all-paths --allow-all-urls`):
-- File system operations
-- Shell command execution
-- Web browsing
-- All MCP tools
-- Skips folder trust prompts and all interactive approvals
+When enabled (`copilot.autopilot: true`), ghclaw passes `--autopilot` to Copilot CLI so prompt mode can continue without waiting for another user message.
 
-`--yolo` is used instead of `--allow-all-tools` because the daemon is non-interactive (piped stdout/stderr, no stdin). `--allow-all-tools` alone does NOT skip folder trust prompts, causing the daemon to hang.
+This is separate from blanket permissions. For internal tasks that genuinely need unrestricted tools, ghclaw now uses explicit `--allow-all` instead of the old YOLO flag.
 
 **Default: OFF.**
 

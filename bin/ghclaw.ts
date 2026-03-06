@@ -175,7 +175,7 @@ program
         const client = new TelegramClient(config.telegram.botToken);
         const me = await client.getMe();
         console.log(`Telegram: ✅ @${me.username}`);
-        console.log(`YOLO Mode: ${config.copilot.yoloMode ? '🔥 Enabled' : '❌ Disabled'}`);
+        console.log(`Autopilot: ${config.copilot.autopilot ? '🤖 Enabled' : '❌ Disabled'}`);
       } catch (error) {
         console.log(`Telegram: ❌ Not connected`);
       }
@@ -282,8 +282,8 @@ program
   });
 
 program
-  .command('yolo <mode>')
-  .description('Set the default Copilot CLI YOLO mode (on/off)')
+  .command('autopilot <mode>')
+  .description('Set the default Copilot CLI autopilot mode (on/off)')
   .action((mode) => {
     const normalized = String(mode).toLowerCase();
     if (!['on', 'off', 'yes', 'no', 'true', 'false'].includes(normalized)) {
@@ -305,11 +305,11 @@ program
       ...current,
       copilot: {
         ...(current.copilot || {}),
-        yoloMode: enabled,
+        autopilot: enabled,
       },
     });
-    console.log(`✅ Default YOLO mode ${enabled ? 'enabled' : 'disabled'}`);
-    console.log(`   Current default command: ghclaw yolo ${enabled ? 'on' : 'off'}`);
+    console.log(`✅ Default autopilot ${enabled ? 'enabled' : 'disabled'}`);
+    console.log(`   Current default command: ghclaw autopilot ${enabled ? 'on' : 'off'}`);
   });
 
 // ============================================================================

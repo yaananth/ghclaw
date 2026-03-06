@@ -60,7 +60,7 @@ async function generateTopicTitle(message: string, cliPath: string = 'copilot'):
   const dirName = require('path').basename(cwd);
   const titlePrompt = loadPrompt('topic-title', { dirName, message: message.slice(0, 200) });
 
-  const proc = Bun.spawn([cliPath, '-p', titlePrompt, '--silent', '--yolo'], {
+  const proc = Bun.spawn([cliPath, '-p', titlePrompt, '--silent'], {
     stdout: 'pipe',
     stderr: 'pipe',
     env: {
@@ -86,8 +86,8 @@ function escapeMarkdown(text: string): string {
 // Track session overrides: when user explicitly picks a Chronicle session
 // Key: "chatId:threadId", Value: Copilot session ID or "__new__" for fresh session
 const sessionOverrides = new Map<string, string>();
-type PendingLaunchStep = 'directory' | 'agent' | 'yolo';
-type LaunchPreferences = { workingDir?: string | null; agent?: string | null; yoloMode?: boolean | null };
+type PendingLaunchStep = 'directory' | 'agent' | 'autopilot';
+type LaunchPreferences = { workingDir?: string | null; agent?: string | null; autopilot?: boolean | null };
 const NO_AGENT = '__none__';
 const pendingLaunchConfigs = new Map<string, { originalPrompt: string; step: PendingLaunchStep; prefs: LaunchPreferences; userId: string }>();
 
@@ -242,15 +242,14 @@ async function continueLaunchQuestionFlow(channel: Channel, chatId: string, thre
       selectedAgent = NO_AGENT;
     }
     pending.prefs.agent = selectedAgent;
-    pending.step = 'yolo';
+    pending.step = 'autopilot';
     pendingLaunchConfigs.set(key, pending);
     await channel.send(chatId, [
-      '3️⃣ *Run in YOLO mode?*',
+      '3️⃣ *Enable Autopilot?*',
       '',
-      `Current default: *${config.copilot.yoloMode ? 'Yes' : 'No'}*`,
+      'Autopilot lets Copilot continue in prompt mode without waiting for another user message.',
       '',
       'Reply `yes` or `no`.',
-      `Set the global default anytime with: \`ghclaw yolo ${config.copilot.yoloMode ? 'off' : 'on'}\``,
     ].join('\n'), {
       threadId: threadId !== '0' ? threadId : undefined,
       format: 'markdown',
@@ -259,7 +258,7 @@ async function continueLaunchQuestionFlow(channel: Channel, chatId: string, thre
   }
 
   if (/^(yes|y|no|n)$/i.test(trimmed)) {
-    pending.prefs.yoloMode = /^(yes|y)$/i.test(trimmed);
+    pending.prefs.autopilot = /^(yes|y)$/i.test(trimmed);
     pendingLaunchConfigs.delete(key);
     return { prompt: pending.originalPrompt, prefs: pending.prefs };
   }
@@ -324,7 +323,7 @@ async function main() {
 
   console.log('\n⚡ Copilot Configuration:');
   console.log(`   Model: ${config.copilot.defaultModel || 'default'}`);
-  console.log(`   YOLO Mode: ${config.copilot.yoloMode ? '🔥 ENABLED (--yolo)' : 'disabled'}`);
+  console.log(`   Autopilot: ${config.copilot.autopilot ? 'ENABLED (--autopilot)' : 'disabled'}`);
 
   console.log('\n💻 Machine:');
   console.log(`   Name: ${config.machine.name}`);
@@ -753,7 +752,7 @@ async function processMessageInner(
       profile: config.copilot.defaultProfile,
       agent: resolvedAgent,
       workingDir: effectiveLaunchPrefs.workingDir || undefined,
-      yoloMode: effectiveLaunchPrefs.yoloMode ?? config.copilot.yoloMode,
+      autopilot: effectiveLaunchPrefs.autopilot ?? config.copilot.autopilot,
       sessionId,  // May be undefined for fresh sessions
       cliPath: config.copilot.cliPath,
     };
