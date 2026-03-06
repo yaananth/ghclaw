@@ -36,6 +36,106 @@ program
   .description('Personal AI assistant powered by Copilot CLI')
   .version(getVersion());
 
+function getDaemonLockPath(): string {
+  return `${getConfigDir()}/daemon.lock`;
+}
+
+function readDaemonLockPid(): number | null {
+  const fs = require('fs');
+  const lockFile = getDaemonLockPath();
+  if (!fs.existsSync(lockFile)) return null;
+
+  const raw = fs.readFileSync(lockFile, 'utf-8').trim();
+  const pid = parseInt(raw, 10);
+  return Number.isFinite(pid) && pid > 0 ? pid : null;
+}
+
+function isPidRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function findDaemonPids(): number[] {
+  const { spawnSync } = require('child_process');
+  const result = spawnSync('ps', ['-axo', 'pid=,command='], { encoding: 'utf-8' });
+  if (result.status !== 0 || !result.stdout) return [];
+
+  return result.stdout
+    .split('\n')
+    .map((line: string) => line.trim())
+    .filter(Boolean)
+    .map((line: string) => {
+      const match = line.match(/^(\d+)\s+(.*)$/);
+      if (!match) return null;
+      const pid = parseInt(match[1], 10);
+      const command = match[2];
+      return { pid, command };
+    })
+    .filter((entry: { pid: number; command: string } | null): entry is { pid: number; command: string } => {
+      return !!entry
+        && entry.pid !== process.pid
+        && entry.command.includes('ghclaw.ts start --foreground');
+    })
+    .map((entry: { pid: number; command: string }) => entry.pid);
+}
+
+function getDaemonStatus(): {
+  running: boolean;
+  pid: number | null;
+  source: 'lock' | 'process' | 'none';
+  extraPids: number[];
+} {
+  const lockPid = readDaemonLockPid();
+  if (lockPid && isPidRunning(lockPid)) {
+    return { running: true, pid: lockPid, source: 'lock', extraPids: [] };
+  }
+
+  const processPids = findDaemonPids();
+  if (processPids.length > 0) {
+    return {
+      running: true,
+      pid: processPids[0],
+      source: 'process',
+      extraPids: processPids.slice(1),
+    };
+  }
+
+  return { running: false, pid: null, source: 'none', extraPids: [] };
+}
+
+async function stopDaemonPids(pids: number[]): Promise<{ stopped: number[]; stillRunning: number[] }> {
+  const stopped: number[] = [];
+  const stillRunning = [...pids];
+
+  for (const pid of pids) {
+    try {
+      process.kill(pid, 'SIGTERM');
+    } catch (err: any) {
+      if (err.code === 'ESRCH') {
+        stopped.push(pid);
+      } else {
+        console.error(`Error stopping daemon PID ${pid}:`, err);
+      }
+    }
+  }
+
+  for (let attempt = 0; attempt < 10 && stillRunning.length > 0; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 500));
+    for (let i = stillRunning.length - 1; i >= 0; i--) {
+      if (!isPidRunning(stillRunning[i])) {
+        stopped.push(stillRunning[i]);
+        stillRunning.splice(i, 1);
+      }
+    }
+  }
+
+  return { stopped, stillRunning };
+}
+
 // ============================================================================
 // Status
 // ============================================================================
@@ -102,12 +202,14 @@ program
       console.log(`\nSessions: No sessions yet`);
     }
 
-    // Daemon status (check for lock file or process)
-    const fs = require('fs');
-    const lockFile = `${getConfigDir()}/daemon.lock`;
-    if (fs.existsSync(lockFile)) {
-      const pid = fs.readFileSync(lockFile, 'utf-8').trim();
-      console.log(`\nDaemon: 🟢 Running (PID ${pid})`);
+    // Daemon status (prefer lock file, fall back to process scan)
+    const daemonStatus = getDaemonStatus();
+    if (daemonStatus.running) {
+      const via = daemonStatus.source === 'lock' ? '' : ' via process scan';
+      console.log(`\nDaemon: 🟢 Running (PID ${daemonStatus.pid})${via}`);
+      if (daemonStatus.extraPids.length > 0) {
+        console.log(`  Additional daemon PIDs: ${daemonStatus.extraPids.join(', ')}`);
+      }
     } else {
       console.log(`\nDaemon: ⚪ Not running`);
     }
@@ -391,51 +493,42 @@ program
 program
   .command('stop')
   .description('Stop the running daemon')
-  .action(() => {
+  .action(async () => {
     const fs = require('fs');
-    const lockFile = `${getConfigDir()}/daemon.lock`;
+    const lockFile = getDaemonLockPath();
+    const daemonStatus = getDaemonStatus();
 
-    if (!fs.existsSync(lockFile)) {
-      console.log('⚪ No daemon running');
-      return;
-    }
-
-    const pid = fs.readFileSync(lockFile, 'utf-8').trim();
-    const pidNum = parseInt(pid);
-    if (isNaN(pidNum) || pidNum <= 0) {
-      console.log('⚠️  Invalid PID in lock file, removing');
-      fs.unlinkSync(lockFile);
-      return;
-    }
-    try {
-      process.kill(pidNum, 'SIGTERM');
-      console.log(`🛑 Sent stop signal to daemon (PID ${pidNum})`);
-      // Wait for process to actually exit before cleaning up lock file
-      let attempts = 0;
-      const checkInterval = setInterval(() => {
-        attempts++;
-        try {
-          process.kill(pidNum, 0); // Check if still alive
-          if (attempts >= 10) {
-            clearInterval(checkInterval);
-            console.log(`⚠️  Daemon still running after 5s. Lock file retained.`);
-          }
-        } catch {
-          // Process gone — safe to clean up
-          clearInterval(checkInterval);
-          if (fs.existsSync(lockFile)) {
-            fs.unlinkSync(lockFile);
-          }
-          console.log(`✅ Daemon stopped`);
-        }
-      }, 500);
-    } catch (err: any) {
-      if (err.code === 'ESRCH') {
+    if (!daemonStatus.running) {
+      if (fs.existsSync(lockFile)) {
         console.log('⚠️  Daemon not running, cleaning up stale lock file');
         fs.unlinkSync(lockFile);
       } else {
-        console.error('Error stopping daemon:', err);
+        console.log('⚪ No daemon running');
       }
+      return;
+    }
+
+    const targetPids = [daemonStatus.pid, ...daemonStatus.extraPids].filter((pid): pid is number => Number.isFinite(pid));
+    console.log(`🛑 Sent stop signal to daemon PID${targetPids.length > 1 ? 's' : ''} ${targetPids.join(', ')}`);
+    const result = await stopDaemonPids(targetPids);
+
+    if (result.stopped.length > 0 && fs.existsSync(lockFile)) {
+      const lockPid = readDaemonLockPid();
+      if (!lockPid || !isPidRunning(lockPid)) {
+        fs.unlinkSync(lockFile);
+      }
+    }
+
+    if (result.stillRunning.length > 0) {
+      console.log(`⚠️  Daemon still running after 5s: ${result.stillRunning.join(', ')}`);
+      if (fs.existsSync(lockFile)) {
+        console.log('   Lock file retained.');
+      }
+    } else {
+      if (fs.existsSync(lockFile)) {
+        fs.unlinkSync(lockFile);
+      }
+      console.log(`✅ Daemon stopped`);
     }
   });
 
