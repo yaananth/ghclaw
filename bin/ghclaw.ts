@@ -13,7 +13,7 @@ import { main as startDaemon } from '../src/daemon';
 import { discoverCopilotFeatures, formatDiscovery } from '../src/copilot/discovery';
 import { TelegramClient } from '../src/telegram/client';
 import { getSecuritySetupInstructions } from '../src/telegram/security';
-import { getConfigAsync, getConfigDir, isConfigComplete } from '../src/config';
+import { getConfigAsync, getConfigDir, isConfigComplete, saveLocalConfig } from '../src/config';
 import { getActiveSessions, archiveOldSessions, getSessionStats, getSessionsByMachine } from '../src/memory/session-mapper';
 import { getSyncState, startSyncLoop } from '../src/github/sync';
 import { checkGhAuth } from '../src/github/auth';
@@ -177,6 +177,37 @@ program
       }
       console.log('\nRun: ghclaw setup');
     }
+  });
+
+program
+  .command('yolo <mode>')
+  .description('Set the default Copilot CLI YOLO mode (on/off)')
+  .action((mode) => {
+    const normalized = String(mode).toLowerCase();
+    if (!['on', 'off', 'yes', 'no', 'true', 'false'].includes(normalized)) {
+      console.log('❌ Mode must be one of: on, off, yes, no, true, false');
+      process.exit(1);
+    }
+
+    const enabled = ['on', 'yes', 'true'].includes(normalized);
+    const configPath = `${getConfigDir()}/config.json`;
+    const fs = require('fs');
+    let current: any = {};
+    try {
+      current = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, 'utf-8')) : {};
+    } catch (error) {
+      console.log(`❌ Could not read ${configPath}: ${error}`);
+      process.exit(1);
+    }
+    saveLocalConfig({
+      ...current,
+      copilot: {
+        ...(current.copilot || {}),
+        yoloMode: enabled,
+      },
+    });
+    console.log(`✅ Default YOLO mode ${enabled ? 'enabled' : 'disabled'}`);
+    console.log(`   Current default command: ghclaw yolo ${enabled ? 'on' : 'off'}`);
   });
 
 // ============================================================================

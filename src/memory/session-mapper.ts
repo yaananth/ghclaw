@@ -38,6 +38,15 @@ export interface ChannelSession {
   machine_name?: string;           // Human-readable machine name
   channel_type?: string;           // 'telegram' | 'discord' | 'slack' | ...
   model?: string;                  // Per-session model override (e.g. "claude-opus-4.5")
+  working_dir?: string | null;     // Launch cwd for Copilot CLI
+  agent?: string | null;           // Custom agent name passed via --agent ("__none__" disables default)
+  yolo_mode?: number | null;       // Session-specific YOLO override (0/1)
+}
+
+export interface SessionLaunchPreferences {
+  workingDir?: string | null;
+  agent?: string | null;
+  yoloMode?: boolean | null;
 }
 
 // ============================================================================
@@ -128,6 +137,21 @@ export function initDatabase(): Database {
   // Migration: add model column if missing (per-session model override)
   try {
     db.exec('ALTER TABLE sessions ADD COLUMN model TEXT');
+  } catch {
+    // Column already exists
+  }
+  try {
+    db.exec('ALTER TABLE sessions ADD COLUMN working_dir TEXT');
+  } catch {
+    // Column already exists
+  }
+  try {
+    db.exec('ALTER TABLE sessions ADD COLUMN agent TEXT');
+  } catch {
+    // Column already exists
+  }
+  try {
+    db.exec('ALTER TABLE sessions ADD COLUMN yolo_mode INTEGER');
   } catch {
     // Column already exists
   }
@@ -421,6 +445,36 @@ export function setSessionModel(sessionId: string, model: string): void {
 export function setSessionModelByChatThread(chatId: number, threadId: number, model: string): void {
   const db = initDatabase();
   db.prepare('UPDATE sessions SET model = ? WHERE chat_id = ? AND thread_id = ?').run(model, chatId, threadId);
+}
+
+export function setSessionLaunchPreferences(sessionId: string, prefs: SessionLaunchPreferences): void {
+  const db = initDatabase();
+  db.prepare(`
+    UPDATE sessions
+    SET working_dir = ?, agent = ?, yolo_mode = ?
+    WHERE id = ?
+  `).run(
+    prefs.workingDir ?? null,
+    prefs.agent ?? null,
+    prefs.yoloMode == null ? null : (prefs.yoloMode ? 1 : 0),
+    sessionId
+  );
+}
+
+export function getSessionLaunchPreferences(chatId: number, threadId: number): SessionLaunchPreferences | null {
+  const db = initDatabase();
+  const row = db.prepare(`
+    SELECT working_dir, agent, yolo_mode
+    FROM sessions
+    WHERE chat_id = ? AND thread_id = ?
+  `).get(chatId, threadId) as { working_dir?: string | null; agent?: string | null; yolo_mode?: number | null } | undefined;
+
+  if (!row) return null;
+  return {
+    workingDir: row.working_dir ?? null,
+    agent: row.agent ?? null,
+    yoloMode: row.yolo_mode == null ? null : Boolean(row.yolo_mode),
+  };
 }
 
 // ============================================================================

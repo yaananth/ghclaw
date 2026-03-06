@@ -12,11 +12,12 @@
 import type { Channel, ChannelMessage, SendOptions } from './channels/channel';
 import { getActiveChannel, type ChannelConfig } from './channels/registry';
 import { checkMessageSecurity, loadSecurityConfig, type SecurityConfig } from './telegram/security';
-import { executePrompt, type SessionOptions } from './copilot/session';
+import { executePrompt, resolveDefaultWorkingDir, type SessionOptions } from './copilot/session';
 import { discoverCopilotFeatures, formatDiscovery, type CopilotDiscovery } from './copilot/discovery';
 import { getConfigAsync, getConfigDir, type Config } from './config';
 import {
   getOrCreateSession,
+  getSession as getMappedSession,
   updateSessionActivity,
   renameSession,
   getSessionStats,
@@ -24,6 +25,8 @@ import {
   getSessionsWithTopics,
   createSessionWithTopic,
   getSessionModel,
+  getSessionLaunchPreferences,
+  setSessionLaunchPreferences,
   getSyncedSessionIds,
   addSyncedSessionId,
   getSyncedTurnCount,
@@ -83,6 +86,10 @@ function escapeMarkdown(text: string): string {
 // Track session overrides: when user explicitly picks a Chronicle session
 // Key: "chatId:threadId", Value: Copilot session ID or "__new__" for fresh session
 const sessionOverrides = new Map<string, string>();
+type PendingLaunchStep = 'directory' | 'agent' | 'yolo';
+type LaunchPreferences = { workingDir?: string | null; agent?: string | null; yoloMode?: boolean | null };
+const NO_AGENT = '__none__';
+const pendingLaunchConfigs = new Map<string, { originalPrompt: string; step: PendingLaunchStep; prefs: LaunchPreferences; userId: string }>();
 
 // Dedup: track recently processed messages to prevent double-processing.
 // Uses content-based key (chatId:threadId:senderId:text) for edge case protection.
@@ -106,6 +113,162 @@ function markProcessed(key: string): boolean {
 
 function getChatKey(chatId: string, threadId: string): string {
   return `${chatId}:${threadId}`;
+}
+
+function getDefaultLaunchDir(): string {
+  return resolveDefaultWorkingDir();
+}
+
+function getAvailableAgents(workingDir?: string | null): { name: string; description?: string }[] {
+  const dirs = [
+    workingDir ? path.join(workingDir, '.github', 'agents') : path.join(process.cwd(), '.github', 'agents'),
+    path.join(process.env.HOME || '', '.copilot', 'agents'),
+  ];
+  const seen = new Set<string>();
+  const agents: { name: string; description?: string }[] = [];
+
+  for (const dir of dirs) {
+    if (!dir || !fs.existsSync(dir)) continue;
+    for (const file of fs.readdirSync(dir).filter(name => name.endsWith('.agent.md')).sort()) {
+      try {
+        const fullPath = path.join(dir, file);
+        const content = fs.readFileSync(fullPath, 'utf-8');
+        const nameMatch = content.match(/^name:\s*(.+)$/m);
+        const descMatch = content.match(/^description:\s*(.+)$/m);
+        const rawName = nameMatch?.[1]?.trim().replace(/^['"]|['"]$/g, '') || file.replace(/\.agent\.md$/, '');
+        if (seen.has(rawName)) continue;
+        seen.add(rawName);
+        agents.push({
+          name: rawName,
+          description: descMatch?.[1]?.trim().replace(/^['"]|['"]$/g, ''),
+        });
+      } catch {
+        // ignore malformed agent files
+      }
+    }
+  }
+
+  return agents;
+}
+
+function formatAgentPrompt(agents: { name: string; description?: string }[], defaultAgent?: string): string {
+  const lines = agents.length > 0
+    ? agents.map((agent, index) => `${index + 1}. \`${agent.name}\`${agent.description ? ` — ${agent.description}` : ''}`).join('\n')
+    : '_No custom agents found in `.github/agents` or `~/.copilot/agents`._';
+  return [
+    '2️⃣ *Which agent should I use?*',
+    '',
+    defaultAgent ? `Default: \`${defaultAgent}\`` : 'Default: none',
+    '',
+    lines,
+    '',
+    'Reply with a number, an agent name, or `none`.',
+  ].join('\n');
+}
+
+async function startLaunchQuestionFlow(channel: Channel, chatId: string, threadId: string, prompt: string, userId: string, config: Config): Promise<void> {
+  const defaultDir = getDefaultLaunchDir();
+  pendingLaunchConfigs.set(getChatKey(chatId, threadId), {
+    originalPrompt: prompt,
+    step: 'directory',
+    prefs: {},
+    userId,
+  });
+
+  await channel.send(chatId, [
+    '1️⃣ *Where should I launch Copilot CLI?*',
+    '',
+    `Reply with a directory path.`,
+    process.env.CODESPACES === 'true'
+      ? `Codespaces default: \`${defaultDir}\``
+      : `Default: \`${defaultDir}\``,
+    '',
+    'You can also reply `default` to use that path.',
+  ].join('\n'), {
+    threadId: threadId !== '0' ? threadId : undefined,
+    format: 'markdown',
+  });
+}
+
+async function continueLaunchQuestionFlow(channel: Channel, chatId: string, threadId: string, userId: string, answer: string, config: Config): Promise<{ prompt: string; prefs: LaunchPreferences } | null> {
+  const key = getChatKey(chatId, threadId);
+  const pending = pendingLaunchConfigs.get(key);
+  if (!pending) return null;
+  if (pending.userId !== userId) {
+    return null;
+  }
+
+  const trimmed = answer.trim();
+  if (!trimmed) return null;
+
+  if (pending.step === 'directory') {
+    const selectedDir = /^(default|d)$/i.test(trimmed) ? getDefaultLaunchDir() : trimmed;
+    if (!fs.existsSync(selectedDir) || !fs.statSync(selectedDir).isDirectory()) {
+      await channel.send(chatId, `❌ Directory not found: \`${escapeMarkdown(selectedDir)}\`\n\nPlease reply with an existing directory or \`default\`.`, {
+        threadId: threadId !== '0' ? threadId : undefined,
+        format: 'markdown',
+      });
+      return null;
+    }
+    pending.prefs.workingDir = selectedDir;
+    pending.step = 'agent';
+    pendingLaunchConfigs.set(key, pending);
+    await channel.send(chatId, formatAgentPrompt(getAvailableAgents(selectedDir), config.copilot.defaultAgent), {
+      threadId: threadId !== '0' ? threadId : undefined,
+      format: 'markdown',
+    });
+    return null;
+  }
+
+  if (pending.step === 'agent') {
+    const agents = getAvailableAgents(pending.prefs.workingDir);
+    let selectedAgent: string | null = null;
+    if (!/^(none|no|default)$/i.test(trimmed)) {
+      const selectedByIndex = Number.parseInt(trimmed, 10);
+      if (Number.isFinite(selectedByIndex) && selectedByIndex >= 1 && selectedByIndex <= agents.length) {
+        selectedAgent = agents[selectedByIndex - 1].name;
+      } else {
+        const match = agents.find(agent => agent.name.toLowerCase() === trimmed.toLowerCase());
+        if (!match) {
+          await channel.send(chatId, '❌ Unknown agent. Reply with a listed number, an exact agent name, or `none`.', {
+            threadId: threadId !== '0' ? threadId : undefined,
+            format: 'markdown',
+          });
+          return null;
+        }
+        selectedAgent = match.name;
+      }
+    } else if (/^(none|no)$/i.test(trimmed)) {
+      selectedAgent = NO_AGENT;
+    }
+    pending.prefs.agent = selectedAgent;
+    pending.step = 'yolo';
+    pendingLaunchConfigs.set(key, pending);
+    await channel.send(chatId, [
+      '3️⃣ *Run in YOLO mode?*',
+      '',
+      `Current default: *${config.copilot.yoloMode ? 'Yes' : 'No'}*`,
+      '',
+      'Reply `yes` or `no`.',
+      `Set the global default anytime with: \`ghclaw yolo ${config.copilot.yoloMode ? 'off' : 'on'}\``,
+    ].join('\n'), {
+      threadId: threadId !== '0' ? threadId : undefined,
+      format: 'markdown',
+    });
+    return null;
+  }
+
+  if (/^(yes|y|no|n)$/i.test(trimmed)) {
+    pending.prefs.yoloMode = /^(yes|y)$/i.test(trimmed);
+    pendingLaunchConfigs.delete(key);
+    return { prompt: pending.originalPrompt, prefs: pending.prefs };
+  }
+
+  await channel.send(chatId, '❌ Please reply `yes` or `no`.', {
+    threadId: threadId !== '0' ? threadId : undefined,
+    format: 'markdown',
+  });
+  return null;
 }
 
 async function main() {
@@ -452,6 +615,12 @@ async function processMessageInner(
     return;
   }
 
+  const pendingLaunch = await continueLaunchQuestionFlow(channel, chatId, threadId, user.id, prompt, config);
+  if (pendingLaunchConfigs.has(getChatKey(chatId, threadId)) || pendingLaunch) {
+    if (!pendingLaunch) return;
+    prompt = pendingLaunch.prompt;
+  }
+
   // Get topic name if available (Telegram-specific, from raw message)
   let topicName: string | undefined;
   if (isForum && message.raw) {
@@ -463,6 +632,14 @@ async function processMessageInner(
   // Determine which session to use
   const key = getChatKey(chatId, threadId);
   const override = sessionOverrides.get(key);
+  const existingMappedSession = getMappedSession(chatIdNum, threadIdNum);
+  const needsLaunchQuestions = override === '__new__' || (!override && !existingMappedSession);
+  let launchPrefsFromQuestions: LaunchPreferences | null = pendingLaunch?.prefs || null;
+
+  if (needsLaunchQuestions && !launchPrefsFromQuestions) {
+    await startLaunchQuestionFlow(channel, chatId, threadId, prompt, user.id, config);
+    return;
+  }
   let sessionId: string | undefined;
   let sessionName: string;
   let createdTopic = false;
@@ -479,7 +656,7 @@ async function processMessageInner(
     sessionName = `Chronicle:${override.slice(0, 8)}`;
   } else {
     // Default: use channel chat/thread mapping
-    const session = getOrCreateSession(chatIdNum, threadIdNum, topicName, config.machine.id, config.machine.name);
+    const session = existingMappedSession || getOrCreateSession(chatIdNum, threadIdNum, topicName, config.machine.id, config.machine.name);
     sessionId = session.id;
     sessionName = session.name;
   }
@@ -503,6 +680,9 @@ async function processMessageInner(
       sessionId = session.id;
       sessionName = session.name;
       setSessionTopicId(session.id, parseInt(targetThreadId));
+      if (launchPrefsFromQuestions) {
+        setSessionLaunchPreferences(session.id, launchPrefsFromQuestions);
+      }
 
       console.log(`📌 Auto-created topic ${targetThreadId}`);
 
@@ -561,13 +741,26 @@ async function processMessageInner(
     // Execute with Copilot CLI, resuming the session if we have one
     const parsedTargetThread = parseInt(targetThreadId, 10);
     const modelThreadId = Number.isFinite(parsedTargetThread) ? parsedTargetThread : threadIdNum;
+    const savedLaunchPrefs = sessionId && !launchPrefsFromQuestions
+      ? getSessionLaunchPreferences(chatIdNum, modelThreadId)
+      : null;
+    const effectiveLaunchPrefs = launchPrefsFromQuestions || savedLaunchPrefs || {};
+    const resolvedAgent = effectiveLaunchPrefs.agent === NO_AGENT
+      ? undefined
+      : (effectiveLaunchPrefs.agent || config.copilot.defaultAgent);
     const sessionOptions: SessionOptions = {
       model: getSessionModel(chatIdNum, modelThreadId) || config.copilot.defaultModel,
       profile: config.copilot.defaultProfile,
-      yoloMode: config.copilot.yoloMode,
+      agent: resolvedAgent,
+      workingDir: effectiveLaunchPrefs.workingDir || undefined,
+      yoloMode: effectiveLaunchPrefs.yoloMode ?? config.copilot.yoloMode,
       sessionId,  // May be undefined for fresh sessions
       cliPath: config.copilot.cliPath,
     };
+
+    if (sessionId && launchPrefsFromQuestions) {
+      setSessionLaunchPreferences(sessionId, launchPrefsFromQuestions);
+    }
 
     const generator = executePrompt(fullPrompt, sessionOptions);
 

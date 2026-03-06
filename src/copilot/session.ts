@@ -15,6 +15,7 @@ import * as fs from 'fs';
 export interface SessionOptions {
   model?: string;
   profile?: string;
+  agent?: string;
   workingDir?: string;
   timeout?: number;
   yoloMode?: boolean;
@@ -29,16 +30,24 @@ export interface StreamChunk {
 
 /**
  * Resolve a sensible default working directory for Copilot CLI.
- * - Codespaces: use /workspaces/<repo> if exactly one workspace exists, else /workspaces/
+ * - Codespaces: use /workspaces/<first-directory> if present, else /workspaces/
  * - Otherwise: user's home directory
  */
-function getDefaultWorkingDir(): string {
+export function resolveDefaultWorkingDir(): string {
   if (process.env.CODESPACES === 'true') {
+    const githubWorkspace = process.env.GITHUB_WORKSPACE;
+    if (githubWorkspace && fs.existsSync(githubWorkspace)) {
+      return githubWorkspace;
+    }
+    const cwd = process.cwd();
+    if (cwd.startsWith('/workspaces/')) {
+      return cwd;
+    }
     const wsRoot = '/workspaces';
     try {
       const entries = fs.readdirSync(wsRoot).filter(e => {
         try { return fs.statSync(`${wsRoot}/${e}`).isDirectory(); } catch { return false; }
-      });
+      }).sort();
       if (entries.length === 1) {
         const dir = `${wsRoot}/${entries[0]}`;
         console.log(`   [cwd] Codespace detected — using workspace: ${dir}`);
@@ -79,6 +88,9 @@ export async function* executePrompt(
   if (options.profile) {
     args.push('--profile', options.profile);
   }
+  if (options.agent) {
+    args.push('--agent', options.agent);
+  }
 
   // YOLO mode: allow all tools (user opted in)
   if (options.yoloMode) {
@@ -94,7 +106,7 @@ export async function* executePrompt(
   const proc = Bun.spawn([cliPath, ...args], {
     stdout: 'pipe',
     stderr: 'pipe',
-    cwd: options.workingDir || getDefaultWorkingDir(),
+    cwd: options.workingDir || resolveDefaultWorkingDir(),
     env: {
       ...process.env,
       GITHUB_TOKEN: (await getGhToken()) || '',
